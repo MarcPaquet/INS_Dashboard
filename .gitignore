@@ -1,0 +1,40 @@
+# Fichiers d'environnement (contiennent des secrets)
+*.env
+*.env.*
+!.env.example
+
+# Ancien fichier avec clés API (NE PAS COMMITTER)
+athletes_id.py
+athletes.json
+
+# Cache
+.cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Outputs
+*.csv
+*.fit
+*.fit.gz
+fit/
+INS_inspect/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+*.env
+athletes.json
+*.local
