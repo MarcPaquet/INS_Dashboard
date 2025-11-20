@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""Display database schema structure."""
+
 """
 Check the actual database schema to understand the data structure.
 """

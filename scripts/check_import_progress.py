@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""Track import status per athlete."""
+
 """Vérifie la progression de l'import et identifie où reprendre"""
 
 import os
@@ -7,14 +9,8 @@ import json
 from datetime import datetime
 
 # Load env
-env_path = "shiny_env.env"
-if os.path.exists(env_path):
-    with open(env_path) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                key, value = line.split('=', 1)
-                os.environ[key] = value.strip('"').strip("'")
+from dotenv import load_dotenv
+load_dotenv(".env.dashboard.local")
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_ANON_KEY")

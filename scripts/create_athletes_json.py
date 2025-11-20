@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""Generate athletes.json template from database."""
+
 """
 Create athletes.json file from existing database data for wellness ingestion.
 """

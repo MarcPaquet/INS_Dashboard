@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
 """
-Intégration Wellness Intervals.icu → Supabase
-Récupère les données de bien-être quotidiennes (HRV, sommeil, FC repos, etc.)
+Wellness data ingestion from Intervals.icu to Supabase.
 
-Usage:
-    # Période spécifique pour tous les athlètes
-    python intervals_wellness_to_supabase.py --start-date 2025-05-01 --end-date 2025-05-07
-    
-    # Un seul athlète
-    python intervals_wellness_to_supabase.py --athlete-id i344978 --start-date 2025-05-01 --end-date 2025-05-07
-    
-    # Mode dry-run (test sans écrire)
-    python intervals_wellness_to_supabase.py --start-date 2025-05-01 --end-date 2025-05-07 --dry-run
+Imports daily wellness metrics (HRV, sleep quality, resting HR, soreness, fatigue, mood).
+
+Usage: python intervals_wellness_to_supabase.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--athlete-id ID] [--dry-run]
 """
 
 import os
@@ -25,7 +18,6 @@ from requests.auth import HTTPBasicAuth
 from typing import List, Dict, Optional
 from supabase import create_client, Client
 
-# Load environment
 load_dotenv("ingest.env")
 
 # Configuration
@@ -33,7 +25,7 @@ BASE_URL = "https://intervals.icu/api/v1"
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
-# Couleurs pour logging
+# Colors
 class Colors:
     GREEN = '\033[92m'
     RED = '\033[91m'
@@ -43,7 +35,7 @@ class Colors:
     BOLD = '\033[1m'
     END = '\033[0m'
 
-# Statistiques globales
+# Global stats
 stats = {
     'athletes_processed': 0,
     'wellness_records_found': 0,
@@ -57,11 +49,11 @@ def log(msg: str, level: str = "INFO"):
     """Logger avec couleurs"""
     timestamp = datetime.now().strftime("%H:%M:%S")
     if level == "ERROR":
-        print(f"{Colors.RED}[{timestamp}] ✗ {msg}{Colors.END}")
+        print(f"{Colors.RED}[{timestamp}] {msg}{Colors.END}")
     elif level == "SUCCESS":
-        print(f"{Colors.GREEN}[{timestamp}] ✓ {msg}{Colors.END}")
+        print(f"{Colors.GREEN}[{timestamp}] {msg}{Colors.END}")
     elif level == "WARNING":
-        print(f"{Colors.YELLOW}[{timestamp}] ⚠ {msg}{Colors.END}")
+        print(f"{Colors.YELLOW}[{timestamp}] {msg}{Colors.END}")
     else:
         print(f"[{timestamp}] {msg}")
 
@@ -104,20 +96,20 @@ def get_wellness_data(athlete: Dict, start_date: str, end_date: str) -> Optional
         
         if response.status_code == 200:
             data = response.json()
-            log(f"  ✓ {len(data)} wellness records retrieved")
+            log(f"  {len(data)} wellness records retrieved")
             return data
         elif response.status_code == 404:
-            log(f"  ⚠ No wellness data available for athlete {athlete_id}", "WARNING")
+            log(f"  No wellness data available for athlete {athlete_id}", "WARNING")
             return []
         else:
-            log(f"  ✗ API error {response.status_code}: {response.text[:100]}", "ERROR")
+            log(f"  API error {response.status_code}: {response.text[:100]}", "ERROR")
             return None
             
     except requests.exceptions.Timeout:
-        log(f"  ✗ Timeout fetching wellness data", "ERROR")
+        log(f"  Timeout fetching wellness data", "ERROR")
         return None
     except Exception as e:
-        log(f"  ✗ Error fetching wellness: {str(e)[:100]}", "ERROR")
+        log(f"  Error fetching wellness: {str(e)[:100]}", "ERROR")
         return None
 
 def transform_wellness_record(raw_record: Dict, athlete_id: str) -> Dict:
@@ -224,15 +216,15 @@ def insert_wellness_to_supabase(records: List[Dict], dry_run: bool = False) -> b
         if response.data:
             inserted_count = len(response.data)
             stats['wellness_records_inserted'] += inserted_count
-            log(f"  ✓ {inserted_count} wellness records upserted successfully", "SUCCESS")
+            log(f"  {inserted_count} wellness records upserted successfully", "SUCCESS")
             return True
         else:
-            log(f"  ✗ No data returned from upsert operation", "ERROR")
+            log(f"  No data returned from upsert operation", "ERROR")
             return False
             
     except Exception as e:
         error_msg = f"Supabase upsert error: {str(e)[:200]}"
-        log(f"  ✗ {error_msg}", "ERROR")
+        log(f"  {error_msg}", "ERROR")
         stats['errors'].append(error_msg)
         return False
 
@@ -241,17 +233,17 @@ def process_athlete_wellness(athlete: Dict, start_date: str, end_date: str, dry_
     athlete_id = athlete['id']
     athlete_name = athlete['name']
     
-    log(f"📊 Processing wellness for {athlete_name} (ID: {athlete_id})")
+    log(f"Processing wellness for {athlete_name} (ID: {athlete_id})")
     
     # Récupérer les données wellness
     wellness_data = get_wellness_data(athlete, start_date, end_date)
     
     if wellness_data is None:
-        log(f"  ✗ Failed to fetch wellness data", "ERROR")
+        log(f"  Failed to fetch wellness data", "ERROR")
         return False
     
     if not wellness_data:
-        log(f"  ⚠ No wellness data found for period", "WARNING")
+        log(f"  No wellness data found for period", "WARNING")
         return True
     
     stats['wellness_records_found'] += len(wellness_data)
@@ -265,11 +257,11 @@ def process_athlete_wellness(athlete: Dict, start_date: str, end_date: str, dry_
             transformed = transform_wellness_record(raw_record, athlete_id)
             transformed_records.append(transformed)
         except Exception as e:
-            log(f"  ✗ Error transforming record {raw_record.get('id', 'unknown')}: {e}", "ERROR")
+            log(f"  Error transforming record {raw_record.get('id', 'unknown')}: {e}", "ERROR")
             continue
     
     if not transformed_records:
-        log(f"  ✗ No valid records after transformation", "ERROR")
+        log(f"  No valid records after transformation", "ERROR")
         return False
     
     # Insérer dans Supabase
@@ -277,24 +269,24 @@ def process_athlete_wellness(athlete: Dict, start_date: str, end_date: str, dry_
     
     if success:
         stats['athletes_processed'] += 1
-        log(f"  ✓ Wellness data processed successfully for {athlete_name}", "SUCCESS")
+        log(f"  Wellness data processed successfully for {athlete_name}", "SUCCESS")
     
     return success
 
 def print_final_stats():
     """Afficher les statistiques finales"""
     print(f"\n{Colors.CYAN}{'='*60}{Colors.END}")
-    print(f"{Colors.CYAN}{Colors.BOLD}📊 WELLNESS INGESTION SUMMARY{Colors.END}")
+    print(f"{Colors.CYAN}{Colors.BOLD}WELLNESS INGESTION SUMMARY{Colors.END}")
     print(f"{Colors.CYAN}{'='*60}{Colors.END}")
     
-    print(f"\n📈 {Colors.BOLD}Statistics:{Colors.END}")
+    print(f"\n{Colors.BOLD}Statistics:{Colors.END}")
     print(f"  Athletes processed: {stats['athletes_processed']}")
     print(f"  API calls made: {stats['api_calls_made']}")
     print(f"  Wellness records found: {stats['wellness_records_found']}")
     print(f"  Records inserted/updated: {stats['wellness_records_inserted']}")
     
     if stats['errors']:
-        print(f"\n❌ {Colors.BOLD}Errors ({len(stats['errors'])}):{Colors.END}")
+        print(f"\n{Colors.BOLD}Errors ({len(stats['errors'])}):{Colors.END}")
         for error in stats['errors'][:5]:  # Show first 5 errors
             print(f"  • {error}")
         if len(stats['errors']) > 5:
@@ -303,9 +295,9 @@ def print_final_stats():
     # Success rate
     if stats['athletes_processed'] > 0:
         success_rate = (stats['wellness_records_inserted'] / stats['wellness_records_found'] * 100) if stats['wellness_records_found'] > 0 else 0
-        print(f"\n✅ {Colors.BOLD}Success Rate: {success_rate:.1f}%{Colors.END}")
+        print(f"\n{Colors.BOLD}Success Rate: {success_rate:.1f}%{Colors.END}")
     
-    print(f"\n{Colors.GREEN}✓ Wellness ingestion completed{Colors.END}")
+    print(f"\n{Colors.GREEN}Wellness ingestion completed{Colors.END}")
 
 def main():
     parser = argparse.ArgumentParser(description="Intégration wellness Intervals.icu → Supabase")
@@ -339,7 +331,7 @@ def main():
         sys.exit(1)
     
     # Header
-    print(f"{Colors.CYAN}{Colors.BOLD}🏃 INTERVALS.ICU WELLNESS INGESTION{Colors.END}")
+    print(f"{Colors.CYAN}{Colors.BOLD}INTERVALS.ICU WELLNESS INGESTION{Colors.END}")
     print(f"{Colors.CYAN}{'='*60}{Colors.END}")
     print(f"Period: {args.start_date} to {args.end_date}")
     print(f"Mode: {'DRY RUN' if args.dry_run else 'LIVE'}")

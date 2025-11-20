@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""Validate activity intervals data integrity."""
+
 """
 Check data integrity across multiple activities to see if this is widespread.
 """

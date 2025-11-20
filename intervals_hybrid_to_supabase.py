@@ -1,19 +1,11 @@
 """
-Intégration Intervals.icu → Supabase HYBRIDE
-Stratégie: FIT d'abord (données complètes + Stryd), fallback sur Streams si échec
+Hybrid activity ingestion from Intervals.icu to Supabase.
+
+Strategy: Prioritize FIT files (complete data + Stryd metrics),
+fallback to Streams API if FIT unavailable.
 
 Usage:
-    # Mode dry-run (test sans écrire)
-    python intervals_hybrid_to_supabase.py --dry-run
-    
-    # Mode normal (écriture dans Supabase)
-    python intervals_hybrid_to_supabase.py
-    
-    # Période spécifique
-    python intervals_hybrid_to_supabase.py --oldest 2024-08-01 --newest 2024-08-21
-    
-    # Un seul athlète
-    python intervals_hybrid_to_supabase.py --athlete "Matthew Beaudet"
+    python intervals_hybrid_to_supabase.py [--oldest YYYY-MM-DD] [--newest YYYY-MM-DD] [--athlete NAME] [--dry-run]
 """
 
 import os
@@ -33,12 +25,8 @@ import pandas as pd
 # Import algorithme temps actif (Strava-like)
 from moving_time import compute_moving_time_strava
 
-# Charger les variables d'environnement
-load_dotenv(".env.ingestion.local")
+load_dotenv(".env", override=True)
 
-# =============================================================================
-# HELPER : Calcul temps actif via algorithme Strava
-# =============================================================================
 
 def compute_t_active_for_records(records: List[Dict], activity_type: str = "run") -> List[Dict]:
     """
@@ -132,17 +120,15 @@ def log(msg: str, level: str = "INFO"):
     """Logger avec couleurs"""
     timestamp = datetime.now().strftime("%H:%M:%S")
     if level == "ERROR":
-        print(f"{Colors.RED}[{timestamp}] ✗ {msg}{Colors.END}")
+        print(f"{Colors.RED}[{timestamp}] {msg}{Colors.END}")
     elif level == "SUCCESS":
-        print(f"{Colors.GREEN}[{timestamp}] ✓ {msg}{Colors.END}")
+        print(f"{Colors.GREEN}[{timestamp}] {msg}{Colors.END}")
     elif level == "WARNING":
-        print(f"{Colors.YELLOW}[{timestamp}] ⚠ {msg}{Colors.END}")
+        print(f"{Colors.YELLOW}[{timestamp}] {msg}{Colors.END}")
     else:
         print(f"[{timestamp}] {msg}")
 
-# ============================================================================
 # Weather API Functions
-# ============================================================================
 
 def _nearest_from_hourly(payload: dict, target_iso: str, keys: list) -> dict:
     """Select nearest hourly value to target timestamp"""
@@ -156,8 +142,7 @@ def _nearest_from_hourly(payload: dict, target_iso: str, keys: list) -> dict:
         from datetime import datetime as dt
         ts = [dt.fromisoformat(t.replace('Z', '+00:00')) for t in times]
         tgt = dt.fromisoformat(target_iso.replace('Z', '+00:00'))
-        
-        # Find nearest time
+
         diffs = [abs((t - tgt).total_seconds()) for t in ts]
         idx = diffs.index(min(diffs))
         
@@ -329,9 +314,7 @@ def fetch_elevation(lat: float, lng: float) -> Optional[float]:
     
     return None
 
-# =============================================================================
 # PHASE 1: Weather Retry Cascade (Best Effort)
-# =============================================================================
 
 def fetch_weather_archive_with_retry(lat: float, lng: float, start_time: str) -> Tuple[dict, Optional[str]]:
     """
@@ -471,9 +454,7 @@ def get_weather_best_effort(lat: float, lng: float, start_time: str) -> Tuple[di
     final_error = f"All weather sources failed after 6 attempts. Last error: {error}"
     return {}, None, final_error
 
-# =============================================================================
 # PHASE 1: HR Fallback Enhancement
-# =============================================================================
 
 def get_avg_hr_with_fallback(activity_metadata: dict, streams_data: dict, records: List[dict]) -> Optional[int]:
     """
@@ -510,9 +491,8 @@ def get_avg_hr_with_fallback(activity_metadata: dict, streams_data: dict, record
     stats['hr_missing'] += 1
     return None
 
-# =============================================================================
+
 # PHASE 1: Generic Retry Wrapper
-# =============================================================================
 
 def retry_with_exponential_backoff(
     func: callable,
@@ -615,8 +595,8 @@ def get_activities(athlete: Dict, oldest: str, newest: str) -> List[Dict]:
         
         if response.status_code == 200:
             activities = response.json()
-            run_activities = [a for a in activities if 'run' in a.get('type', '').lower()]
-            return run_activities
+            # Return ALL activities (running and cross-training)
+            return activities
         return []
     except Exception as e:
         log(f"Erreur get_activities: {e}", "ERROR")
@@ -638,7 +618,7 @@ def get_streams(athlete: Dict, activity_id: str) -> Optional[Dict]:
         streams, error = retry_with_exponential_backoff(_fetch_streams, max_retries=3)
         
         if not streams:
-            log(f"  ✗ Streams API failed: {error}", "ERROR")
+            log(f"  Streams API failed: {error}", "ERROR")
             return None
         
         # Convertir liste en dict si nécessaire
@@ -653,7 +633,7 @@ def get_streams(athlete: Dict, activity_id: str) -> Optional[Dict]:
         return streams
         
     except Exception as e:
-        log(f"  ✗ Erreur get_streams: {e}", "ERROR")
+        log(f"  Erreur get_streams: {e}", "ERROR")
         return None
 
 def enrich_intervals_with_active_time(intervals: List[Dict], records: List[Dict]) -> List[Dict]:
@@ -848,10 +828,10 @@ def download_and_parse_fit(athlete: Dict, activity_id: str, athlete_id: str) -> 
         fit_content, download_error = download_fit_file_with_retry(athlete, activity_id)
         
         if not fit_content:
-            log(f"  ✗ FIT download failed: {download_error}", "ERROR")
+            log(f"  FIT download failed: {download_error}", "ERROR")
             return None, None, False
         
-        log(f"  ✓ FIT téléchargé ({len(fit_content):,} bytes)")
+        log(f"  FIT téléchargé ({len(fit_content):,} bytes)")
         
         # Parser
         fit_file = FitFile(io.BytesIO(fit_content))
@@ -939,6 +919,8 @@ def download_and_parse_fit(athlete: Dict, activity_id: str, athlete_id: str) -> 
                     point['vertical_ratio'] = float(field.value)
                 elif field.name == 'step_length' and field.value is not None:
                     point['step_length'] = float(field.value)
+                elif field.name == 'Leg Spring Stiffness' and field.value is not None:
+                    point['leg_spring_stiffness'] = float(field.value)
 
             records.append(point)
             ts_offset_ms += 1000
@@ -973,11 +955,11 @@ def download_and_parse_fit(athlete: Dict, activity_id: str, athlete_id: str) -> 
             if enhanced_avg_hr:
                 metadata['avg_hr'] = enhanced_avg_hr
         
-        log(f"  ✓ FIT parsé: {len(records)} records")
+        log(f"  FIT parsé: {len(records)} records")
         return records, metadata, True
         
     except Exception as e:
-        log(f"  ✗ Erreur FIT: {str(e)[:100]}", "WARNING")
+        log(f"  Erreur FIT: {str(e)[:100]}", "WARNING")
         return None, None, False
 
 def normalize_records(records: List[Dict]) -> List[Dict]:
@@ -1022,9 +1004,9 @@ def insert_to_supabase(records: List[Dict], metadata: Dict, intervals: List[Dict
         if meta_response.status_code not in [200, 201]:
             try:
                 error_detail = meta_response.json()
-                log(f"  ✗ Metadata error {meta_response.status_code}: {error_detail}", "ERROR")
+                log(f"  Metadata error {meta_response.status_code}: {error_detail}", "ERROR")
             except:
-                log(f"  ✗ Metadata error {meta_response.status_code}: {meta_response.text[:200]}", "ERROR")
+                log(f"  Metadata error {meta_response.status_code}: {meta_response.text[:200]}", "ERROR")
             return False
         
         stats['metadata_inserted'] += 1
@@ -1041,9 +1023,9 @@ def insert_to_supabase(records: List[Dict], metadata: Dict, intervals: List[Dict
                 error_msg = f"Batch {i//BATCH_SIZE + 1}: {records_response.status_code}"
                 try:
                     error_detail = records_response.json()
-                    log(f"  ✗ {error_msg} - {error_detail}", "ERROR")
+                    log(f"  {error_msg} - {error_detail}", "ERROR")
                 except:
-                    log(f"  ✗ {error_msg} - {records_response.text[:200]}", "ERROR")
+                    log(f"  {error_msg} - {records_response.text[:200]}", "ERROR")
                 continue
             
             total_inserted += len(batch)
@@ -1057,16 +1039,16 @@ def insert_to_supabase(records: List[Dict], metadata: Dict, intervals: List[Dict
             
             if intervals_response.status_code in [200, 201]:
                 stats['intervals_inserted'] += len(intervals)
-                log(f"  ✓ Inséré {total_inserted} records + metadata + {len(intervals)} intervals", "SUCCESS")
+                log(f"  Inséré {total_inserted} records + metadata + {len(intervals)} intervals", "SUCCESS")
             else:
                 try:
                     error_detail = intervals_response.json()
-                    log(f"  ⚠ Intervals error {intervals_response.status_code}: {error_detail}", "WARNING")
+                    log(f"  Intervals error {intervals_response.status_code}: {error_detail}", "WARNING")
                 except:
-                    log(f"  ⚠ Intervals error {intervals_response.status_code}: {intervals_response.text[:200]}", "WARNING")
-                log(f"  ✓ Inséré {total_inserted} records + metadata (sans intervals)", "SUCCESS")
+                    log(f"  Intervals error {intervals_response.status_code}: {intervals_response.text[:200]}", "WARNING")
+                log(f"  Inséré {total_inserted} records + metadata (sans intervals)", "SUCCESS")
         else:
-            log(f"  ✓ Inséré {total_inserted} records + metadata", "SUCCESS")
+            log(f"  Inséré {total_inserted} records + metadata", "SUCCESS")
         
         return True
         
@@ -1080,9 +1062,49 @@ def process_activity(athlete: Dict, activity: Dict, dry_run: bool = False):
     activity_type = activity.get('type')
     activity_date = activity.get('start_date_local', '')[:10]
     distance = (activity.get('distance') or 0) / 1000
-    
-    log(f"  📍 {activity_type} - {activity_date} - {distance:.2f} km (ID: {activity_id})")
-    
+
+    log(f"  {activity_type} - {activity_date} - {distance:.2f} km (ID: {activity_id})")
+
+    # Define running activity types
+    RUNNING_TYPES = ['run', 'trailrun', 'virtualrun']
+    is_running = activity_type.lower() in RUNNING_TYPES
+
+    # For non-running activities (cross-training), only import basic metadata
+    if not is_running:
+        log(f"  → Cross-training activity: importing metadata only (no FIT/weather/intervals)")
+
+        # Extract basic metadata from Intervals.icu activity object
+        start_time_str = activity.get('start_date_local')
+        distance_m = activity.get('distance')  # Meters
+        duration_sec = activity.get('moving_time') or activity.get('elapsed_time')  # Seconds
+        avg_hr = activity.get('avg_hr')  # BPM
+
+        metadata = {
+            'activity_id': activity_id,
+            'athlete_id': athlete['id'],
+            'type': activity_type,
+            'date': activity_date,
+            'start_time': start_time_str,
+            'source': 'intervals_basic',
+            'fit_available': False
+        }
+
+        # Add optional fields only if they exist and are not None
+        if distance_m is not None:
+            metadata['distance_m'] = int(distance_m)
+        if duration_sec is not None:
+            metadata['duration_sec'] = int(duration_sec)
+        if avg_hr is not None:
+            metadata['avg_hr'] = int(avg_hr)
+
+        # Insert metadata only (no records, no intervals)
+        success = insert_to_supabase([], metadata, None, dry_run)
+        if success:
+            stats['activities_processed'] += 1
+            log(f"  Cross-training metadata imported successfully", "SUCCESS")
+        return success
+
+    # For running activities, continue with full processing
     # Essayer FIT d'abord
     records, metadata, fit_success = download_and_parse_fit(athlete, activity_id, athlete['id'])
     
@@ -1136,11 +1158,11 @@ def process_activity(athlete: Dict, activity: Dict, dry_run: bool = False):
                     stats['weather_from_archive'] += 1
                 elif weather_source == 'forecast':
                     stats['weather_from_forecast'] += 1
-                    log(f"  ⚠️  Using forecast weather (archive unavailable)", "WARNING")
+                    log(f"   Using forecast weather (archive unavailable)", "WARNING")
             else:
                 # Weather completely unavailable - flag but CONTINUE
                 metadata['weather_error'] = weather_error
-                log(f"  ✗ Weather unavailable: {weather_error}", "ERROR")
+                log(f"  Weather unavailable: {weather_error}", "ERROR")
                 stats['weather_missing'] += 1
             
             # Ajouter les données de qualité de l'air
@@ -1162,7 +1184,7 @@ def process_activity(athlete: Dict, activity: Dict, dry_run: bool = False):
         # Récupérer les intervals
         intervals = get_intervals(athlete, activity_id)
         if intervals:
-            log(f"  ✓ {len(intervals)} intervals récupérés")
+            log(f"  {len(intervals)} intervals récupérés")
             # Enrichir avec temps actif pour affichage dashboard
             intervals = enrich_intervals_with_active_time(intervals, records)
         
@@ -1177,21 +1199,21 @@ def process_activity(athlete: Dict, activity: Dict, dry_run: bool = False):
     
     streams = get_streams(athlete, activity_id)
     if not streams:
-        log(f"  ✗ Streams non disponibles", "ERROR")
+        log(f"  Streams non disponibles", "ERROR")
         stats['fit_failed'] += 1
         return False
     
-    log(f"  ✓ Streams récupérés")
+    log(f"  Streams récupérés")
     
     # Déterminer le type d'activité pour l'algorithme moving time
     activity_type = activity.get('type', 'Run').lower()
     
     records = parse_streams_to_records(streams, activity_id, activity_type)
     if not records:
-        log(f"  ✗ Aucun record extrait des streams", "ERROR")
+        log(f"  Aucun record extrait des streams", "ERROR")
         return False
     
-    log(f"  ✓ Streams parsés: {len(records)} records")
+    log(f"  Streams parsés: {len(records)} records")
     
     # Get all available fields from Intervals.icu activity data that match our schema
     start_time_str = activity.get('start_date_local')
@@ -1276,11 +1298,11 @@ def process_activity(athlete: Dict, activity: Dict, dry_run: bool = False):
                 stats['weather_from_archive'] += 1
             elif weather_source == 'forecast':
                 stats['weather_from_forecast'] += 1
-                log(f"  ⚠️  Using forecast weather (archive unavailable)", "WARNING")
+                log(f"   Using forecast weather (archive unavailable)", "WARNING")
         else:
             # Weather completely unavailable - flag but CONTINUE
             metadata['weather_error'] = weather_error
-            log(f"  ✗ Weather unavailable: {weather_error}", "ERROR")
+            log(f"  Weather unavailable: {weather_error}", "ERROR")
             stats['weather_missing'] += 1
         
         # Ajouter les données de qualité de l'air
@@ -1310,12 +1332,12 @@ def process_activity(athlete: Dict, activity: Dict, dry_run: bool = False):
     if enhanced_avg_hr:
         metadata['avg_hr'] = enhanced_avg_hr
     else:
-        log(f"  ⚠️  No HR data available", "WARNING")
+        log(f"   No HR data available", "WARNING")
     
     # Récupérer les intervals
     intervals = get_intervals(athlete, activity_id)
     if intervals:
-        log(f"  ✓ {len(intervals)} intervals récupérés")
+        log(f"  {len(intervals)} intervals récupérés")
         # Enrichir avec temps actif pour affichage dashboard
         intervals = enrich_intervals_with_active_time(intervals, records)
     
@@ -1331,7 +1353,7 @@ def process_athlete(athlete: Dict, oldest: str, newest: str, dry_run: bool = Fal
     athlete_id = athlete['id']
     
     log(f"\n{'='*70}")
-    log(f"👤 {name} ({athlete_id})")
+    log(f"{name} ({athlete_id})")
     log(f"{'='*70}")
     
     activities = get_activities(athlete, oldest, newest)
@@ -1341,7 +1363,7 @@ def process_athlete(athlete: Dict, oldest: str, newest: str, dry_run: bool = Fal
         return
     
     stats['activities_found'] += len(activities)
-    log(f"✓ {len(activities)} activités de course trouvées", "SUCCESS")
+    log(f"{len(activities)} activités de course trouvées", "SUCCESS")
     
     for i, activity in enumerate(activities, 1):
         log(f"\n[{i}/{len(activities)}]")
@@ -1352,7 +1374,7 @@ def process_athlete(athlete: Dict, oldest: str, newest: str, dry_run: bool = Fal
 def print_summary():
     """Résumé final (Phase 1 Enhanced)"""
     print(f"\n{Colors.BLUE}{'='*70}{Colors.END}")
-    print(f"{Colors.BOLD}📊 RÉSUMÉ FINAL{Colors.END}")
+    print(f"{Colors.BOLD}RÉSUMÉ FINAL{Colors.END}")
     print(f"{Colors.BLUE}{'='*70}{Colors.END}\n")
     
     print(f"Athlètes traités: {stats['athletes_processed']}")
@@ -1360,31 +1382,31 @@ def print_summary():
     print(f"Activités traitées: {stats['activities_processed']}")
     
     print(f"\nSources:")
-    print(f"  ✓ FIT réussi: {stats['fit_success']} ({stats['fit_success']/max(stats['activities_found'],1)*100:.1f}%)")
-    print(f"  ⚠ Fallback streams: {stats['stream_fallback']} ({stats['stream_fallback']/max(stats['activities_found'],1)*100:.1f}%)")
-    print(f"  ✗ Échecs: {stats['fit_failed']}")
+    print(f"  FIT réussi: {stats['fit_success']} ({stats['fit_success']/max(stats['activities_found'],1)*100:.1f}%)")
+    print(f"  Fallback streams: {stats['stream_fallback']} ({stats['stream_fallback']/max(stats['activities_found'],1)*100:.1f}%)")
+    print(f"  Échecs: {stats['fit_failed']}")
     
     # Phase 1: Weather completeness
     if stats['outdoor_activities'] > 0:
         weather_pct = stats['weather_complete'] / stats['outdoor_activities'] * 100
-        print(f"\n🌤️ Météo (activités extérieures):")
+        print(f"\n️ Météo (activités extérieures):")
         print(f"  Total extérieur: {stats['outdoor_activities']}")
         print(f"  Avec météo: {stats['weather_complete']} ({weather_pct:.1f}%)")
         print(f"    • Archive: {stats['weather_from_archive']}")
         print(f"    • Forecast: {stats['weather_from_forecast']}")
         if stats['weather_missing'] > 0:
-            print(f"  {Colors.RED}✗ Sans météo: {stats['weather_missing']}{Colors.END}")
+            print(f"  {Colors.RED}Sans météo: {stats['weather_missing']}{Colors.END}")
         else:
-            print(f"  ✓ Sans météo: 0")
+            print(f"  Sans météo: 0")
     
     # Phase 1: HR completeness  
     if stats['hr_monitor_used'] > 0:
         hr_pct = stats['hr_complete'] / stats['hr_monitor_used'] * 100
-        print(f"\n💓 Fréquence cardiaque:")
+        print(f"\nFréquence cardiaque:")
         print(f"  Moniteur utilisé: {stats['hr_monitor_used']}")
         print(f"  HR complète: {stats['hr_complete']} ({hr_pct:.1f}%)")
         if stats['hr_missing'] > 0:
-            print(f"  {Colors.YELLOW}⚠ HR manquante: {stats['hr_missing']}{Colors.END}")
+            print(f"  {Colors.YELLOW}HR manquante: {stats['hr_missing']}{Colors.END}")
     
     print(f"\nDonnées insérées:")
     print(f"  Records: {stats['records_inserted']:,}")
@@ -1406,11 +1428,11 @@ def main():
     args = parser.parse_args()
     
     print(f"\n{Colors.BOLD}{'='*70}")
-    print("🚀 INTÉGRATION HYBRIDE INTERVALS.ICU → SUPABASE")
+    print("INTÉGRATION HYBRIDE INTERVALS.ICU → SUPABASE")
     print(f"{'='*70}{Colors.END}\n")
     
     if args.dry_run:
-        print(f"{Colors.YELLOW}⚠️  MODE DRY-RUN{Colors.END}\n")
+        print(f"{Colors.YELLOW} MODE DRY-RUN{Colors.END}\n")
     
     print(f"Période: {args.oldest} → {args.newest}")
     print(f"Stratégie: FIT (priorité) + Streams (fallback)")
@@ -1428,7 +1450,7 @@ def main():
     # Phase 2: Refresh materialized view after data import
     if not args.dry_run and stats['activities_processed'] > 0:
         try:
-            print(f"\n{Colors.BLUE}🔄 Refreshing materialized view...{Colors.END}")
+            print(f"\n{Colors.BLUE}Refreshing materialized view...{Colors.END}")
             refresh_url = f"{SUPABASE_URL}/rest/v1/rpc/refresh_activity_summary"
             response = requests.post(
                 refresh_url,
@@ -1440,11 +1462,11 @@ def main():
                 timeout=60
             )
             if response.status_code in (200, 204):
-                print(f"{Colors.GREEN}✅ Materialized view refreshed{Colors.END}\n")
+                print(f"{Colors.GREEN}Materialized view refreshed{Colors.END}\n")
             else:
-                print(f"{Colors.YELLOW}⚠️  View refresh returned status {response.status_code}{Colors.END}\n")
+                print(f"{Colors.YELLOW} View refresh returned status {response.status_code}{Colors.END}\n")
         except Exception as e:
-            print(f"{Colors.YELLOW}⚠️  Could not refresh view: {e}{Colors.END}\n")
+            print(f"{Colors.YELLOW} Could not refresh view: {e}{Colors.END}\n")
     
     return 0 if stats['activities_processed'] > 0 else 1
 

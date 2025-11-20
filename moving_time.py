@@ -15,9 +15,7 @@ import numpy as np
 import pandas as pd
 
 
-# =============================================================================
-# CONSTANTES
-# =============================================================================
+# ========== CONSTANTES ==========
 
 # Seuils de vitesse par type d'activité (m/s)
 SPEED_THRESHOLDS: dict[str, float] = {
@@ -34,9 +32,7 @@ SPEED_THRESHOLDS: dict[str, float] = {
 MIN_STOP_DURATION: float = 10.0
 
 
-# =============================================================================
-# DISTANCE HAVERSINE
-# =============================================================================
+# ========== DISTANCE HAVERSINE ==========
 
 def haversine_distance(
     lat1: float,

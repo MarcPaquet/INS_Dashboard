@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""Repair activities with missing average heart rate."""
+
 """
 Script to populate missing avg_hr values in activity_metadata table
 by calculating them from the timeseries data.
