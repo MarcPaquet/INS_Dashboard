@@ -454,6 +454,175 @@ def get_weather_best_effort(lat: float, lng: float, start_time: str) -> Tuple[di
     final_error = f"All weather sources failed after 6 attempts. Last error: {error}"
     return {}, None, final_error
 
+
+# WEATHER BACKFILL SYSTEM
+
+def supa_select(table: str, select: str = "*", params: dict = None) -> pd.DataFrame:
+    """
+    Query Supabase table and return results as DataFrame.
+
+    Args:
+        table: Table name
+        select: Columns to select (default: all)
+        params: Query parameters (e.g., {"date": "gte.2024-11-01"})
+
+    Returns:
+        DataFrame with query results
+    """
+    url = f"{SUPABASE_URL}/rest/v1/{table}?select={select}"
+
+    # Add query parameters
+    if params:
+        for key, value in params.items():
+            url += f"&{key}={value}"
+
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        return pd.DataFrame(data)
+    except Exception as e:
+        log(f"Query error: {e}", "ERROR")
+        return pd.DataFrame()
+
+
+def backfill_forecast_weather(days_back_min: int = 3, days_back_max: int = 7, dry_run: bool = False):
+    """
+    Update activities with forecast weather to archive weather.
+
+    Open-Meteo archive data availability:
+    - ECMWF IFS: 2 days delay
+    - ERA5: 5 days delay
+
+    We check 3-7 days back to ensure archive data is available while
+    avoiding endless retries.
+
+    Args:
+        days_back_min: Start checking this many days back (default: 3)
+        days_back_max: Stop checking after this many days back (default: 7)
+        dry_run: If True, only report what would be updated
+    """
+    from datetime import datetime as dt, timedelta
+
+    # Calculate date range
+    today = dt.now().date()
+    oldest_date = today - timedelta(days=days_back_max)
+    newest_date = today - timedelta(days=days_back_min)
+
+    log(f"\n{Colors.BOLD}{'='*70}")
+    log(f"WEATHER BACKFILL: Checking {oldest_date} to {newest_date}")
+    log(f"{'='*70}{Colors.END}")
+
+    # Query activities with forecast weather in this range
+    params = {
+        "date": f"gte.{oldest_date}&date.lte.{newest_date}",
+        "weather_source": "eq.forecast"
+    }
+
+    activities_to_update = supa_select(
+        "activity_metadata",
+        select="activity_id,athlete_id,date,start_lat,start_lon,start_time,weather_source",
+        params=params
+    )
+
+    if activities_to_update.empty:
+        log("  No activities with forecast weather found in window")
+        return
+
+    log(f"  Found {len(activities_to_update)} activities with forecast weather")
+
+    updated_count = 0
+    still_forecast = 0
+    no_coords = 0
+
+    for _, activity in activities_to_update.iterrows():
+        activity_id = activity['activity_id']
+        activity_date = activity['date']
+
+        # Skip if no GPS coordinates
+        if pd.isna(activity['start_lat']) or pd.isna(activity['start_lon']):
+            log(f"  {activity_id} ({activity_date}): No GPS coordinates")
+            no_coords += 1
+            continue
+
+        log(f"  Checking {activity_id} ({activity_date})...")
+
+        # Try to fetch archive weather (should be available now)
+        weather, weather_source, weather_error = get_weather_best_effort(
+            activity['start_lat'],
+            activity['start_lon'],
+            activity['start_time']
+        )
+
+        # Check if we got archive data
+        if weather_source == 'archive' and weather:
+            log(f"    ✅ Archive weather now available!", "SUCCESS")
+
+            if not dry_run:
+                # Build update data with all weather fields
+                update_data = {
+                    'weather_source': 'archive'
+                }
+
+                # Add weather fields if available
+                if weather.get('temperature_2m') is not None:
+                    update_data['weather_temp_c'] = weather['temperature_2m']
+                if weather.get('relative_humidity_2m') is not None:
+                    update_data['weather_humidity_pct'] = int(weather['relative_humidity_2m'])
+                if weather.get('dew_point_2m') is not None:
+                    update_data['weather_dew_point_c'] = weather['dew_point_2m']
+                if weather.get('wind_speed_10m') is not None:
+                    update_data['weather_wind_speed_ms'] = weather['wind_speed_10m']
+                if weather.get('wind_gusts_10m') is not None:
+                    update_data['weather_wind_gust_ms'] = weather['wind_gusts_10m']
+                if weather.get('wind_direction_10m') is not None:
+                    update_data['weather_wind_dir_deg'] = int(weather['wind_direction_10m'])
+                if weather.get('pressure_msl') is not None:
+                    update_data['weather_pressure_hpa'] = weather['pressure_msl']
+                if weather.get('cloudcover') is not None:
+                    update_data['weather_cloudcover_pct'] = int(weather['cloudcover'])
+                if weather.get('precipitation') is not None:
+                    update_data['weather_precip_mm'] = weather['precipitation']
+
+                # Use PATCH to update existing record
+                update_url = f"{SUPABASE_URL}/rest/v1/activity_metadata?activity_id=eq.{activity_id}"
+                headers = {
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json"
+                }
+
+                try:
+                    response = requests.patch(update_url, headers=headers, json=update_data, timeout=30)
+                    if response.status_code == 200:
+                        log(f"    Updated forecast → archive", "SUCCESS")
+                        updated_count += 1
+                    else:
+                        log(f"    Update failed: {response.status_code}", "ERROR")
+                except Exception as e:
+                    log(f"    Update error: {e}", "ERROR")
+            else:
+                log(f"    [DRY-RUN] Would update to archive")
+                updated_count += 1
+
+        elif weather_source == 'forecast':
+            log(f"    ⏳ Still forecast (archive not ready yet)")
+            still_forecast += 1
+        else:
+            log(f"    ⚠️  No weather available: {weather_error}", "WARNING")
+
+    log(f"\n{Colors.BOLD}Backfill Summary:{Colors.END}")
+    log(f"  Updated forecast → archive: {updated_count}")
+    log(f"  Still using forecast: {still_forecast}")
+    log(f"  No coordinates: {no_coords}")
+    log("")
+
+
 # PHASE 1: HR Fallback Enhancement
 
 def get_avg_hr_with_fallback(activity_metadata: dict, streams_data: dict, records: List[dict]) -> Optional[int]:
@@ -688,32 +857,39 @@ def get_intervals(athlete: Dict, activity_id: str) -> List[Dict]:
             for interval in intervals:
                 # Helper pour convertir en int si non-null
                 def to_int(val):
-                    return int(round(val)) if val is not None else None
+                    if val is None:
+                        return None
+                    try:
+                        # Handle numeric types (int, float)
+                        return int(round(float(val)))
+                    except (ValueError, TypeError):
+                        # If conversion fails (e.g., string), return None
+                        return None
                 
                 formatted_intervals.append({
                     'activity_id': activity_id,
-                    'interval_id': interval.get('id'),
-                    'start_index': interval.get('start_index'),
-                    'end_index': interval.get('end_index'),
-                    'start_time': interval.get('start_time'),
-                    'end_time': interval.get('end_time'),
+                    'interval_id': to_int(interval.get('id')),
+                    'start_index': to_int(interval.get('start_index')),
+                    'end_index': to_int(interval.get('end_index')),
+                    'start_time': to_int(interval.get('start_time')),
+                    'end_time': to_int(interval.get('end_time')),
                     'type': interval.get('type'),
                     'distance': interval.get('distance'),
-                    'moving_time': interval.get('moving_time'),
-                    'elapsed_time': interval.get('elapsed_time'),
+                    'moving_time': to_int(interval.get('moving_time')),
+                    'elapsed_time': to_int(interval.get('elapsed_time')),
                     'average_watts': interval.get('average_watts'),
-                    'min_watts': to_int(interval.get('min_watts')),
-                    'max_watts': to_int(interval.get('max_watts')),
+                    'min_watts': interval.get('min_watts'),  # REAL - keep decimal precision
+                    'max_watts': interval.get('max_watts'),  # REAL - keep decimal precision
                     'average_watts_kg': interval.get('average_watts_kg'),
                     'max_watts_kg': interval.get('max_watts_kg'),
-                    'intensity': to_int(interval.get('intensity')),
+                    'intensity': interval.get('intensity'),  # TEXT - keep original value
                     'weighted_average_watts': interval.get('weighted_average_watts'),
                     'training_load': interval.get('training_load'),
-                    'joules': to_int(interval.get('joules')),
+                    'joules': interval.get('joules'),  # REAL - keep decimal precision
                     'decoupling': interval.get('decoupling'),
                     'zone': to_int(interval.get('zone')),
-                    'zone_min_watts': to_int(interval.get('zone_min_watts')),
-                    'zone_max_watts': to_int(interval.get('zone_max_watts')),
+                    'zone_min_watts': interval.get('zone_min_watts'),  # REAL - keep decimal precision
+                    'zone_max_watts': interval.get('zone_max_watts'),  # REAL - keep decimal precision
                     'average_speed': interval.get('average_speed'),
                     'min_speed': interval.get('min_speed'),
                     'max_speed': interval.get('max_speed'),
@@ -723,14 +899,14 @@ def get_intervals(athlete: Dict, activity_id: str) -> List[Dict]:
                     'average_cadence': to_int(interval.get('average_cadence')),
                     'min_cadence': to_int(interval.get('min_cadence')),
                     'max_cadence': to_int(interval.get('max_cadence')),
-                    'average_torque': to_int(interval.get('average_torque')),
-                    'min_torque': to_int(interval.get('min_torque')),
-                    'max_torque': to_int(interval.get('max_torque')),
+                    'average_torque': interval.get('average_torque'),  # REAL - keep decimal precision
+                    'min_torque': interval.get('min_torque'),  # REAL - keep decimal precision
+                    'max_torque': interval.get('max_torque'),  # REAL - keep decimal precision
                     'total_elevation_gain': interval.get('total_elevation_gain'),
                     'min_altitude': interval.get('min_altitude'),
                     'max_altitude': interval.get('max_altitude'),
                     'average_gradient': interval.get('average_gradient'),
-                    'group_id': interval.get('group_id')
+                    'group_id': to_int(interval.get('group_id'))
                 })
             
             return formatted_intervals
@@ -966,18 +1142,34 @@ def normalize_records(records: List[Dict]) -> List[Dict]:
     """Normaliser les records pour que tous aient les mêmes clés (fix PGRST102)"""
     if not records:
         return records
-    
+
     # Collecter toutes les clés uniques
     all_keys = set()
     for record in records:
         all_keys.update(record.keys())
-    
+
+    # Define INTEGER columns that need conversion from float to int
+    INTEGER_COLUMNS = {
+        'heartrate', 'cadence', 'watts', 'time', 'ts_offset_ms',
+        'enhanced_altitude', 't_active_sec'
+    }
+
     # Normaliser chaque record
     normalized = []
     for record in records:
-        normalized_record = {key: record.get(key) for key in all_keys}
+        normalized_record = {}
+        for key in all_keys:
+            value = record.get(key)
+            # Convert floats to integers for INTEGER columns
+            if key in INTEGER_COLUMNS and value is not None:
+                try:
+                    normalized_record[key] = int(round(value))
+                except (ValueError, TypeError):
+                    normalized_record[key] = value
+            else:
+                normalized_record[key] = value
         normalized.append(normalized_record)
-    
+
     return normalized
 
 def insert_to_supabase(records: List[Dict], metadata: Dict, intervals: List[Dict] = None, dry_run: bool = False):
@@ -1067,7 +1259,7 @@ def process_activity(athlete: Dict, activity: Dict, dry_run: bool = False):
 
     # Define running activity types
     RUNNING_TYPES = ['run', 'trailrun', 'virtualrun']
-    is_running = activity_type.lower() in RUNNING_TYPES
+    is_running = activity_type and activity_type.lower() in RUNNING_TYPES
 
     # For non-running activities (cross-training), only import basic metadata
     if not is_running:
@@ -1424,29 +1616,59 @@ def main():
     parser.add_argument('--oldest', default='2024-08-01', help="Date début")
     parser.add_argument('--newest', default='2024-08-21', help="Date fin")
     parser.add_argument('--athlete', help="Athlète spécifique")
-    
+    parser.add_argument('--backfill-weather', action='store_true',
+                        help="Update forecast weather to archive (3-7 days back)")
+    parser.add_argument('--backfill-only', action='store_true',
+                        help="Only run weather backfill, skip activity import")
+    parser.add_argument('--backfill-min-days', type=int, default=3,
+                        help="Start backfill this many days back (default: 3)")
+    parser.add_argument('--backfill-max-days', type=int, default=7,
+                        help="Stop backfill after this many days back (default: 7)")
+
     args = parser.parse_args()
-    
+
     print(f"\n{Colors.BOLD}{'='*70}")
     print("INTÉGRATION HYBRIDE INTERVALS.ICU → SUPABASE")
     print(f"{'='*70}{Colors.END}\n")
-    
+
     if args.dry_run:
         print(f"{Colors.YELLOW} MODE DRY-RUN{Colors.END}\n")
-    
+
+    # Handle backfill-only mode
+    if args.backfill_only:
+        print(f"{Colors.BLUE}Mode: Weather backfill only (skipping activity import){Colors.END}")
+        print(f"Window: {args.backfill_min_days}-{args.backfill_max_days} days back\n")
+        backfill_forecast_weather(
+            days_back_min=args.backfill_min_days,
+            days_back_max=args.backfill_max_days,
+            dry_run=args.dry_run
+        )
+        return 0
+
     print(f"Période: {args.oldest} → {args.newest}")
     print(f"Stratégie: FIT (priorité) + Streams (fallback)")
-    print(f"Supabase: {SUPABASE_URL}\n")
-    
+    print(f"Supabase: {SUPABASE_URL}")
+    if args.backfill_weather:
+        print(f"{Colors.BLUE}Weather backfill: Enabled (3-7 days back){Colors.END}")
+    print("")
+
     athletes = load_athletes(args.athlete)
     if not athletes:
         return 1
-    
+
     for athlete in athletes:
         process_athlete(athlete, args.oldest, args.newest, args.dry_run)
-    
+
     print_summary()
-    
+
+    # Weather backfill (if requested)
+    if args.backfill_weather and not args.dry_run:
+        backfill_forecast_weather(
+            days_back_min=args.backfill_min_days,
+            days_back_max=args.backfill_max_days,
+            dry_run=False
+        )
+
     # Phase 2: Refresh materialized view after data import
     if not args.dry_run and stats['activities_processed'] > 0:
         try:

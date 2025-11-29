@@ -89,8 +89,18 @@ YVAR_ALIASES = {
 }
 
 # ========== Chargement .env & session HTTP Supabase ==========
-ENV_PATH = os.environ.get("INS_ENV_FILE") or "/Users/marcantoinepaquet/Documents/INS/shiny_env.env"
-load_dotenv(dotenv_path=ENV_PATH, override=False)
+# Try loading env files in order:
+#   1. .env.dashboard.local (local development)
+#   2. shiny_env.env (legacy)
+#   3. .env (production - shinyapps.io)
+env_files = [".env.dashboard.local", "shiny_env.env", ".env"]
+script_dir = os.path.dirname(os.path.abspath(__file__))
+for env_file in env_files:
+    env_path = os.path.join(script_dir, env_file)
+    if os.path.exists(env_path):
+        load_dotenv(dotenv_path=env_path, override=True)  # Override shell variables
+        print(f"✅ Loaded environment from: {env_file}")
+        break
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
@@ -229,27 +239,32 @@ def fetch_metadata(start_iso: str, end_iso: str, athlete_ids: list[str], limit: 
         "and": f"(start_time.lte.{end_iso})",
         "order": "start_time.asc",
     }
+    # Select only columns that exist in activity_metadata table
     cols = ("activity_id,athlete_id,type,date,start_time,distance_m,duration_sec,avg_hr,"
-            "weather_temp_c,weather_humidity_pct,weather_wind_speed_ms,weather_cloudcover_pct,air_us_aqi,"
-            "distance_km,duration_min,type_lower,pace_skm,type_category")
-    # Phase 2: Use materialized view for 3-5x faster queries
-    df = supa_select("activity_summary", select=cols, params=params, limit=limit)
-    
+            "weather_temp_c,weather_humidity_pct,weather_wind_speed_ms,weather_cloudcover_pct,air_us_aqi")
+    df = supa_select("activity_metadata", select=cols, params=params, limit=limit)
+
     if not df.empty:
         if "start_time" in df.columns:
             df["start_time"] = pd.to_datetime(df["start_time"], errors="coerce")
         df["type"] = df["type"].astype(str).str.strip()
-        
-        # Phase 2: type_lower and type_category now come from view (pre-computed)
-        # Only compute if not present (fallback for compatibility)
-        if "type_lower" not in df.columns:
-            df["type_lower"] = df["type"].str.lower()
-        if "type_category" not in df.columns:
-            df["type_category"] = df["type_lower"].map({
-                "run": "Course",
-                "trailrun": "Course",
-                "virtualrun": "Tapis"
-            }).fillna("Autre")
+
+        # Compute derived columns in Python
+        df["type_lower"] = df["type"].str.lower()
+        df["type_category"] = df["type_lower"].map({
+            "run": "Course",
+            "trailrun": "Course",
+            "virtualrun": "Tapis"
+        }).fillna("Autre")
+
+        # Compute distance_km, duration_min, pace_skm
+        df["distance_km"] = df["distance_m"] / 1000.0
+        df["duration_min"] = df["duration_sec"] / 60.0
+        df["pace_skm"] = df.apply(
+            lambda row: (row["duration_sec"] / 60.0) / (row["distance_m"] / 1000.0)
+            if row["distance_m"] and row["distance_m"] > 0 else None,
+            axis=1
+        )
     
     # Store in cache
     _metadata_cache[cache_key] = df.copy()
@@ -266,10 +281,10 @@ def fetch_date_range(athlete_id: str, include_vrun: bool = True) -> tuple[date |
     if not include_vrun:
         params_earliest["type"] = "neq.VirtualRun"
         params_latest["type"] = "neq.VirtualRun"
-    # Plus ancienne (Phase 2: use activity_summary view)
-    df_min = supa_select("activity_summary", select="start_time", params={**params_earliest, "order": "start_time.asc"}, limit=1)
+    # Plus ancienne (Phase 2: use activity_metadata table)
+    df_min = supa_select("activity_metadata", select="start_time", params={**params_earliest, "order": "start_time.asc"}, limit=1)
     # Plus récente
-    df_max = supa_select("activity_summary", select="start_time", params={**params_latest, "order": "start_time.desc"}, limit=1)
+    df_max = supa_select("activity_metadata", select="start_time", params={**params_latest, "order": "start_time.desc"}, limit=1)
     if df_min.empty or df_max.empty:
         return None, None
     
@@ -1054,15 +1069,21 @@ app_ui = ui.page_fluid(
         box-shadow: 0 4px 12px rgba(220, 38, 38, 0.3);
       }
       
-      /* Responsive design */
-      @media (max-width: 1200px) {
+      /* Responsive design - Progressive stacking for better readability */
+      @media (max-width: 1400px) {
         .summary-grid-full { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .bslib-grid .col-4 { grid-column: span 12 !important; }
       }
-      
-      @media (max-width: 800px) {
+
+      @media (max-width: 992px) {
         .summary-grid-full { grid-template-columns: 1fr; }
+        .bslib-grid .col-4 { grid-column: span 12 !important; }
+        .bslib-grid .col-6 { grid-column: span 12 !important; }
         h2 { font-size: 2.1rem; }
+      }
+
+      @media (max-width: 768px) {
+        .summary-grid-full { grid-template-columns: 1fr; }
+        h2 { font-size: 1.8rem; }
       }
       
       /* Animations */
@@ -1081,7 +1102,11 @@ app_ui = ui.page_fluid(
     # Load flatpickr French locale
     ui.tags.script(src="https://cdn.jsdelivr.net/npm/flatpickr/dist/l10n/fr.js"),
     ui.tags.script("""
-        // Initialize flatpickr for all date inputs with French locale
+        // Global variables for data date range (will be set by Shiny)
+        window.dataMinDate = null;
+        window.dataMaxDate = null;
+
+        // Initialize flatpickr for all date inputs with French locale and date restrictions
         function initializeFrenchDatePickers() {
             if (typeof flatpickr === 'undefined') {
                 setTimeout(initializeFrenchDatePickers, 100);
@@ -1098,8 +1123,8 @@ app_ui = ui.page_fluid(
                 // Get the current value
                 var currentValue = $(this).val();
 
-                // Initialize flatpickr with French locale
-                flatpickr(this, {
+                // Build flatpickr config with date restrictions
+                var config = {
                     locale: 'fr',
                     dateFormat: 'Y-m-d',
                     defaultDate: currentValue || null,
@@ -1108,7 +1133,18 @@ app_ui = ui.page_fluid(
                         // Trigger Shiny input change
                         $(instance.input).trigger('change');
                     }
-                });
+                };
+
+                // Add min/max date restrictions if available
+                if (window.dataMinDate) {
+                    config.minDate = window.dataMinDate;
+                }
+                if (window.dataMaxDate) {
+                    config.maxDate = window.dataMaxDate;
+                }
+
+                // Initialize flatpickr with config
+                flatpickr(this, config);
             });
         }
 
@@ -1793,34 +1829,34 @@ def server(input, output, session):
         password = input.login_password()
         if not password:
             ui.insert_ui(
-                ui.HTML('<script>document.getElementById("login_error").style.display="block"; document.getElementById("login_error").innerText="Please enter a password";</script>'),
+                ui.HTML('<script>document.getElementById("login_error").style.display="block"; document.getElementById("login_error").innerText="Veuillez entrer votre mot de passe";</script>'),
                 selector="body",
                 where="beforeEnd"
             )
             return
-        
+
         # Fetch all users from database
         try:
             users_response = supa_select("users", select="*")
-            
+
             # Check password against all users
             authenticated_user = None
             for _, user_row in users_response.iterrows():
                 if verify_password(password, user_row['password_hash']):
                     authenticated_user = user_row
                     break
-            
+
             if authenticated_user is not None:
                 # Successful login
                 is_authenticated.set(True)
                 user_role.set(authenticated_user['role'])
                 user_athlete_id.set(authenticated_user['athlete_id'])
                 user_name.set(authenticated_user['name'])
-                
+
                 # Close modal and clear password
                 ui.modal_remove()
                 ui.update_text("login_password", value="")
-                
+
                 print(f"Login successful: {authenticated_user['name']} ({authenticated_user['role']})")
             else:
                 # Failed login
@@ -1867,7 +1903,7 @@ def server(input, output, session):
         # For coach, just show "Coach", for athletes show their name
         display_text = "Coach" if role == "coach" else name
         return ui.tags.button(display_text, class_="btn btn-light", style="font-weight: 600; font-size: 1.1rem; cursor: default;", disabled=True)
-    
+
     # Helper function to get effective athlete_id for filtering
     def get_effective_athlete_id():
         """Returns the athlete_id to use for filtering data based on role and selection."""
@@ -1916,7 +1952,11 @@ def server(input, output, session):
     meta_df = reactive.Value(pd.DataFrame())         # meta filtrées sur période + athlète (+ toggle vrun)
     act_label_to_id = reactive.Value({})             # libellé -> activity_id (pour Run/TrailRun)
     id_to_info = reactive.Value({})                  # activity_id -> infos (type, date_str)
-    
+
+    # Data date range (for restricting date pickers)
+    data_min_date = reactive.Value(None)  # Earliest date with data
+    data_max_date = reactive.Value(None)  # Latest date with data
+
     # Calendar heatmap state
     current_calendar_year = reactive.Value(date.today().year)  # Current year for calendar display
     selected_calendar_date = reactive.Value(None)  # Selected date from calendar
@@ -1930,6 +1970,33 @@ def server(input, output, session):
     comparison_calendar_year_2 = reactive.Value(date.today().year)
     crop_range_1 = reactive.Value([0, 0])
     crop_range_2 = reactive.Value([0, 0])
+
+    # Set date range for flatpickr restrictions
+    @reactive.Effect
+    @reactive.event(data_min_date, data_max_date)
+    def _update_date_range():
+        min_date = data_min_date.get()
+        max_date = data_max_date.get()
+
+        if min_date and max_date:
+            # Convert to ISO format strings for JavaScript
+            min_str = min_date.isoformat()
+            max_str = max_date.isoformat()
+
+            # Inject JavaScript to update date range and reinitialize date pickers
+            js_code = f"""
+                window.dataMinDate = '{min_str}';
+                window.dataMaxDate = '{max_str}';
+                // Reinitialize all date pickers with new limits
+                if (typeof initializeFrenchDatePickers === 'function') {{
+                    initializeFrenchDatePickers();
+                }}
+            """
+            ui.insert_ui(
+                ui.tags.script(js_code),
+                selector="body",
+                where="beforeEnd"
+            )
 
     def _range_iso() -> tuple[str, str]:
         sd = pd.to_datetime(input.date_start() or date.today()).date()
@@ -1979,27 +2046,24 @@ def server(input, output, session):
                 return
             
             # Fetch ALL running activities for this athlete (no date filter, exclude cross-training)
-            # Use activity_summary view for better performance (Phase 2)
+            # Use activity_metadata table for better performance (Phase 2)
             params = {
                 "athlete_id": f"eq.{athlete_id}",
                 "type": "in.(Run,TrailRun,VirtualRun)",
                 "order": "date.desc",
             }
             cols = "date,duration_sec"
-            df_all = supa_select("activity_summary", select=cols, params=params, limit=50000)
+            df_all = supa_select("activity_metadata", select=cols, params=params, limit=50000)
             
             if df_all.empty:
                 calendar_all_activities.set({})
                 return
             
+            # OPTIMIZATION: Use pandas groupby instead of manual loop (10-50x faster)
             # Group by date and count activities
-            by_date_count = {}
-            for _, row in df_all.iterrows():
-                date_str = str(row["date"])
-                if date_str not in by_date_count:
-                    by_date_count[date_str] = 0
-                by_date_count[date_str] += 1
-            
+            df_all["date_str"] = df_all["date"].astype(str)
+            by_date_count = df_all.groupby("date_str").size().to_dict()
+
             calendar_all_activities.set(by_date_count)
         except Exception as e:
             print(f"Error loading calendar data: {e}")
@@ -2015,89 +2079,102 @@ def server(input, output, session):
             "trailrun": "Course en sentier",
             "virtualrun": "Course sur tapis"
         }
-        
+
         if not df.empty and "type" in df.columns:
             # Inclure toutes les activités de course
             m = df["type"].str.lower().isin(["run", "trailrun", "virtualrun"])
             dfr = df.loc[m].copy()
-            if "start_time" in dfr.columns:
+            if "start_time" in dfr.columns and not dfr.empty:
                 dfr = dfr.sort_values("start_time", ascending=False)  # Plus récent en premier
                 dfr["date_str"] = pd.to_datetime(dfr["start_time"]).dt.date.astype(str)
-                
-                def make_label(row):
-                    # Type de course en français
-                    type_fr = type_labels.get(str(row["type"]).lower(), str(row["type"]))
-                    
-                    # Date en format français complet (ex: 2 juillet 2025)
-                    date_obj = pd.to_datetime(row["start_time"])
-                    mois_fr = ["janvier", "février", "mars", "avril", "mai", "juin", 
-                               "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
-                    date_str = f"{date_obj.day} {mois_fr[date_obj.month - 1]} {date_obj.year}"
-                    
-                    # Durée en format mm:ss ou h:mm:ss si > 60 minutes
-                    duration_min = row.get("duration_min", 0)
-                    
-                    # Handle NaN or missing values
-                    if pd.isna(duration_min) or duration_min == 0:
-                        time_str = "0:00"
-                    else:
-                        total_seconds = int(duration_min * 60)
-                        hours = total_seconds // 3600
-                        minutes = (total_seconds % 3600) // 60
-                        seconds = total_seconds % 60
-                        
-                        if hours > 0:
-                            time_str = f"{hours}:{minutes:02d}:{seconds:02d}"
-                        else:
-                            time_str = f"{minutes}:{seconds:02d}"
-                    
-                    # Distance en km
-                    distance_km = row.get("distance_km", 0)
-                    if pd.isna(distance_km):
-                        dist_str = "0.00"
-                    else:
-                        dist_str = f"{distance_km:.2f}"
-                    
-                    # Check if activity has intervals
-                    activity_id = str(row["activity_id"])
-                    has_intervals = False
+
+                # OPTIMIZATION 1: Fetch ALL intervals for ALL activities in ONE query (instead of N queries)
+                activity_ids = dfr["activity_id"].astype(str).tolist()
+                activities_with_intervals = set()
+                if activity_ids:
                     try:
-                        # Quick check for intervals (lightweight query)
-                        intervals_response = supabase.table("activity_intervals") \
-                            .select("activity_id") \
-                            .eq("activity_id", activity_id) \
-                            .limit(1) \
-                            .execute()
-                        has_intervals = len(intervals_response.data) > 0
-                    except:
-                        pass  # If query fails, just don't add the tag
-                    
-                    # Build base label
-                    base_label = f"{type_fr} - {date_str} - {time_str} - {dist_str} km"
-                    
-                    # Add intervals tag if applicable
-                    if has_intervals:
-                        return f"{base_label} (intervalles)"
-                    else:
-                        return base_label
-                
-                dfr["label"] = dfr.apply(make_label, axis=1)
-                
-                # Build activities_by_date for calendar heatmap
-                by_date = {}
-                for _, r in dfr.iterrows():
-                    aid = str(r["activity_id"])
-                    labels_map[r["label"]] = aid
-                    info_map[aid] = {"type": str(r["type"]), "date_str": r["date_str"]}
-                    
-                    # Group by date for calendar
-                    date_key = r["date_str"]
-                    if date_key not in by_date:
-                        by_date[date_key] = []
-                    by_date[date_key].append({"activity_id": aid, "label": r["label"]})
-                
+                        # Single query to get all activities that have intervals
+                        intervals_query = supa_select(
+                            "activity_intervals",
+                            select="activity_id",
+                            params={"activity_id": f"in.({','.join(activity_ids)})"},
+                            limit=10000
+                        )
+                        if not intervals_query.empty:
+                            activities_with_intervals = set(intervals_query["activity_id"].astype(str).unique())
+                    except Exception as e:
+                        print(f"Warning: Could not fetch intervals data: {e}")
+                        activities_with_intervals = set()
+
+                # OPTIMIZATION 2: Vectorized date formatting using pandas operations
+                mois_fr = ["janvier", "février", "mars", "avril", "mai", "juin",
+                           "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
+
+                # Parse all dates at once
+                dates = pd.to_datetime(dfr["start_time"])
+                dfr["jour"] = dates.dt.day
+                dfr["mois_nom"] = dates.dt.month.apply(lambda m: mois_fr[m - 1])
+                dfr["annee"] = dates.dt.year
+
+                # Format time strings vectorized
+                duration_min = dfr["duration_min"].fillna(0)
+                total_seconds = (duration_min * 60).astype(int)
+                hours = total_seconds // 3600
+                minutes = (total_seconds % 3600) // 60
+                seconds = total_seconds % 60
+
+                # Conditional time formatting
+                dfr["time_str"] = np.where(
+                    hours > 0,
+                    hours.astype(str) + ":" + minutes.astype(str).str.zfill(2) + ":" + seconds.astype(str).str.zfill(2),
+                    minutes.astype(str) + ":" + seconds.astype(str).str.zfill(2)
+                )
+
+                # Format distance
+                dfr["dist_str"] = dfr["distance_km"].fillna(0).apply(lambda x: f"{x:.2f}")
+
+                # Map type labels
+                dfr["type_fr"] = dfr["type"].str.lower().map(type_labels).fillna(dfr["type"])
+
+                # Check intervals presence
+                dfr["has_intervals"] = dfr["activity_id"].astype(str).isin(activities_with_intervals)
+
+                # Build labels vectorized
+                dfr["base_label"] = (
+                    dfr["type_fr"] + " - " +
+                    dfr["jour"].astype(str) + " " + dfr["mois_nom"] + " " + dfr["annee"].astype(str) + " - " +
+                    dfr["time_str"] + " - " +
+                    dfr["dist_str"] + " km"
+                )
+
+                # Add intervals tag where applicable
+                dfr["label"] = np.where(
+                    dfr["has_intervals"],
+                    dfr["base_label"] + " (intervalles)",
+                    dfr["base_label"]
+                )
+
+                # OPTIMIZATION 3: Build dictionaries using vectorized operations instead of iterrows
+                labels_map = dict(zip(dfr["label"], dfr["activity_id"].astype(str)))
+                info_map = dict(
+                    zip(
+                        dfr["activity_id"].astype(str),
+                        [{"type": str(t), "date_str": d} for t, d in zip(dfr["type"], dfr["date_str"])]
+                    )
+                )
+
+                # OPTIMIZATION 4: Group by date using pandas groupby (much faster than manual loop)
+                grouped = dfr.groupby("date_str")
+                by_date = {
+                    date_key: [
+                        {"activity_id": str(row["activity_id"]), "label": row["label"]}
+                        for _, row in group[["activity_id", "label"]].iterrows()
+                    ]
+                    for date_key, group in grouped
+                }
+
                 activities_by_date.set(by_date)
-        
+
         act_label_to_id.set(labels_map)
         id_to_info.set(info_map)
         ui.update_select("activity_sel", choices=list(labels_map.keys()),
@@ -2134,6 +2211,13 @@ def server(input, output, session):
                 df_calc["duration_min"] = pd.to_numeric(df_calc.get("duration_sec"), errors="coerce") / 60.0
                 df_calc["distance_km"] = pd.to_numeric(df_calc.get("distance_m"), errors="coerce") / 1000.0
                 df_calc["type_lower"] = df_calc.get("type", pd.Series(dtype=str)).astype(str).str.lower()
+
+                # Calculate data date range for date picker restrictions
+                if "date_local" in df_calc.columns and not df_calc.empty:
+                    dates = df_calc["date_local"].dt.date
+                    data_min_date.set(dates.min())
+                    data_max_date.set(dates.max())
+
             meta_df_all.set(df_calc.copy())
             df_view = df_calc.copy()
             if not df_view.empty:
@@ -2239,7 +2323,7 @@ def server(input, output, session):
         if not display_mask.any():
             return _create_empty_plotly_fig("Aucune donnée dans la plage sélectionnée", height=360)
 
-        idx = ctl.index[display_mask]
+        idx = ctl.index[display_mask].to_pydatetime()  # Convert to Python datetime for Plotly
         ctl_vals = ctl.loc[display_mask]
         atl_vals = atl.loc[display_mask]
         tsb_vals = tsb.loc[display_mask]
@@ -2287,10 +2371,18 @@ def server(input, output, session):
         
         fig.update_layout(
             title=dict(text="Moyenne pondérée exponentiellement — CTL / ATL / TSB", font=dict(size=16, color='#262626')),
-            xaxis=dict(title=dict(text="Date", font=dict(size=14)), showgrid=True, gridcolor='rgba(128, 128, 128, 0.2)', tickfont=dict(size=12)),
+            xaxis=dict(
+                title=dict(text="Date", font=dict(size=14)),
+                type='date',
+                tickformat='%d %b',  # Format: "15 Nov", "20 Nov", etc.
+                showgrid=True,
+                gridcolor='rgba(128, 128, 128, 0.2)',
+                tickfont=dict(size=12),
+                autorange=True  # Ensure proper range
+            ),
             yaxis=dict(
-                title=dict(text=y_label, font=dict(size=14)), 
-                showgrid=True, 
+                title=dict(text=y_label, font=dict(size=14)),
+                showgrid=True,
                 gridcolor='rgba(128, 128, 128, 0.2)',
                 range=y_range,
                 tickfont=dict(size=12)
@@ -2526,7 +2618,7 @@ def server(input, output, session):
                 pivot[c] = 0.0
         pivot = pivot[cats]
 
-        weeks = pivot.index
+        weeks = pivot.index.to_pydatetime()  # Convert to Python datetime objects for Plotly
         if len(weeks) == 0:
             return empty_fig("Aucune semaine disponible")
 
@@ -2567,9 +2659,12 @@ def server(input, output, session):
             title=dict(text="Volume hebdomadaire par type (km)", font=dict(size=16, color='#262626')),
             xaxis=dict(
                 title="",
+                type='date',
+                tickformat='%d %b',  # Format: "15 Nov", "20 Nov", etc.
                 showgrid=True,
                 gridcolor='rgba(128, 128, 128, 0.2)',
-                tickfont=dict(size=12)
+                tickfont=dict(size=12),
+                autorange=True  # Ensure proper range
             ),
             yaxis=dict(
                 title=dict(text="Distance hebdomadaire (km)", font=dict(size=14)),
@@ -2895,6 +2990,7 @@ def server(input, output, session):
         # Update layout - larger and more visible
         fig.update_layout(
             xaxis=dict(
+                tickmode='array',  # Force use of custom ticktext/tickvals
                 ticktext=month_labels,
                 tickvals=month_positions,
                 tickangle=0,
@@ -3194,7 +3290,8 @@ def server(input, output, session):
             title=d["x_label"],
             showgrid=True,
             gridcolor='rgba(128, 128, 128, 0.2)',
-            zeroline=False
+            zeroline=False,
+            autorange=True  # Ensure proper range, prevents compression
         )
         
         # Add custom tick formatting for time-based X-axis
