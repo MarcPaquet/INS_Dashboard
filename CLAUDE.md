@@ -167,11 +167,17 @@ Better Training Decisions
 
 ### 🔧 Recent Session (Nov 29, 2025)
 
-**Ingestion Script Validation:**
+**Morning - Ingestion Script Validation:**
 1. ✅ Dry-run test passed (14 activities)
 2. ✅ Fixed decimal precision for REAL fields (min_watts, max_watts, joules, etc.)
 3. ✅ Real import test passed (36,262 records, 103 intervals)
 4. ✅ Data integrity verified in Supabase
+
+**Evening - GitHub Cleanup & Wellness Integration:**
+1. ✅ GitHub repository cleaned (20+ files → gitignore, kept locally)
+2. ✅ Wellness ingestion merged into main script (auto-runs for all athletes)
+3. ✅ README.md updated with correct project structure
+4. ✅ Pushed to GitHub: https://github.com/MarcPaquet/INS_Dashboard
 
 **Decision Made:**
 - ❌ Alliance Canada Cloud (cancelled)
@@ -259,13 +265,12 @@ except: calculate_from_records()
 | `create_personal_records_table.sql` | All-time best performances | ⏳ Pending |
 | `create_athlete_training_zones.sql` | Versioned training zones | ⏳ Pending |
 
-### 🟢 Priority 3: Git Commit
+### 🟢 Priority 3: Git Commit ✅ DONE
 
-Document all recent changes:
-- Decimal precision fix for intervals
-- Test import validation
-- AWS automation plan
-- Updated CLAUDE.md
+All changes committed and pushed to GitHub:
+- GitHub repository cleaned (20+ files removed from tracking)
+- Wellness integration merged into main ingestion script
+- Documentation updated
 
 ---
 
@@ -275,10 +280,6 @@ Document all recent changes:
 - Connect daily/weekly surveys to database
 - Currently in test mode - needs real database writes
 - Enable closed-loop analytics
-
-### Wellness API Integration
-- Test `intervals_wellness_to_supabase.py`
-- Import HRV, sleep, soreness data from Intervals.icu
 
 ### Dashboard Enhancements
 - Intervals visualization tab (temporarily removed)
@@ -528,6 +529,14 @@ BULK IMPORT (One-time):
 - Data integrity verified
 - AWS automation plan finalized
 
+### Phase 2I: GitHub Cleanup & Wellness Integration (Nov 29, 2025) ✅
+- GitHub repository cleaned (20+ utility/test files → gitignore)
+- Wellness ingestion merged into main script
+- Auto-imports wellness for ALL athletes on every run
+- UPSERT prevents duplicates (safe to run multiple times)
+- README.md updated with correct project structure
+- Pushed to: https://github.com/MarcPaquet/INS_Dashboard
+
 ---
 
 ## 📝 QUICK REFERENCE
@@ -548,16 +557,14 @@ AQ_TIMEOUT=10
 ### Common Commands
 
 ```bash
-# Test import (dry-run)
+# Test import (dry-run) - also tests wellness
 python intervals_hybrid_to_supabase.py --oldest 2025-11-25 --newest 2025-11-28 --dry-run
 
 # Real import (specific athlete)
 python intervals_hybrid_to_supabase.py --athlete "Matthew Beaudet" --oldest 2021-01-01 --newest 2024-12-31
 
-# Deploy dashboard
-cd test_deploy
-SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem \
-rsconnect deploy shiny . --name insquebec-sportsciences --app-id 16149191 --python $(which python3)
+# Run dashboard locally
+shiny run supabase_shiny.py
 ```
 
 ### ShinyApps.io Registry
@@ -571,6 +578,11 @@ rsconnect deploy shiny . --name insquebec-sportsciences --app-id 16149191 --pyth
 - **Project:** vqcqqfddgnvhcrxcaxjf
 - **Region:** Default
 - **Tables:** 11 (athlete, users, activity_metadata, activity, activity_intervals, wellness, daily_workout_surveys, weekly_wellness_surveys, personal_records, athlete_training_zones)
+
+### GitHub Repository
+- **URL:** https://github.com/MarcPaquet/INS_Dashboard
+- **Files:** 12 (+ 8 migrations)
+- **Local-only:** scripts/, tests/, utility files (via .gitignore)
 
 ---
 
