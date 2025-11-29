@@ -41,3 +41,20 @@ athletes.json
 
 # Claude Code local settings
 .claude/
+
+# Local utility scripts (keep locally, not in git)
+scripts/
+tests/
+bulk_import.py
+create_users.py
+run_migrations_direct.py
+intervals_wellness_to_supabase.py
+
+# Local documentation
+ARCHIVE_DETAILED.md
+DIAGRAM_CONTEXT.md
+
+# Deployment cache
+rsconnect-python/
+.python-version
+start_dashboard.sh

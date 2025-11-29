@@ -1563,6 +1563,155 @@ def process_athlete(athlete: Dict, oldest: str, newest: str, dry_run: bool = Fal
     
     stats['athletes_processed'] += 1
 
+# =============================================================================
+# WELLNESS INTEGRATION (merged from intervals_wellness_to_supabase.py)
+# =============================================================================
+
+def transform_wellness_record(raw_record: Dict, athlete_id: str) -> Dict:
+    """
+    Transform wellness record from Intervals.icu to Supabase format.
+    Maps camelCase → snake_case according to wellness table schema.
+    """
+    transformed = {
+        'athlete_id': athlete_id,
+        'date': raw_record.get('id'),  # 'id' is the date in YYYY-MM-DD format
+        'source': 'intervals.icu',
+        'created_at': datetime.now().isoformat()
+    }
+
+    # Field mapping (camelCase → snake_case)
+    field_mapping = {
+        'restingHR': 'resting_hr',
+        'avgSleepingHR': 'sleeping_hr',
+        'hrv': 'hrv_rmssd',
+        'hrvSDNN': 'hrv_sdnn',
+        'sleepSecs': 'sleep_seconds',
+        'sleepScore': 'sleep_score',
+        'sleepQuality': 'sleep_quality',
+        'spO2': 'spo2',
+        'systolic': 'blood_pressure_systolic',
+        'diastolic': 'blood_pressure_diastolic',
+        'soreness': 'soreness',
+        'fatigue': 'fatigue',
+        'stress': 'stress',
+        'mood': 'mood',
+        'motivation': 'motivation',
+        'injury': 'injury',
+        'weight': 'weight_kg',
+        'bodyFat': 'body_fat_pct',
+        'muscleMass': 'muscle_mass_kg',
+        'hydration': 'hydration',
+        'nutrition': 'nutrition',
+        'temperature': 'temperature_c',
+        'menstruation': 'menstruation',
+        'supplements': 'supplements',
+        'notes': 'notes'
+    }
+
+    for intervals_field, supabase_field in field_mapping.items():
+        if intervals_field in raw_record:
+            value = raw_record[intervals_field]
+            if value is not None:
+                if intervals_field == 'sleepSecs':
+                    transformed[supabase_field] = int(value)
+                elif intervals_field == 'bodyFat':
+                    transformed[supabase_field] = float(value * 100) if isinstance(value, (int, float)) else value
+                else:
+                    transformed[supabase_field] = value
+
+    return transformed
+
+
+def get_wellness_data(athlete: Dict, target_date: str) -> Optional[List[Dict]]:
+    """Fetch wellness data for a specific date from Intervals.icu."""
+    athlete_id = athlete['id']
+    api_key = athlete['api_key']
+
+    try:
+        url = f"{BASE_URL}/athlete/{athlete_id}/wellness"
+        params = {"oldest": target_date, "newest": target_date}
+
+        response = requests.get(
+            url,
+            auth=HTTPBasicAuth("API_KEY", api_key),
+            params=params,
+            timeout=30
+        )
+
+        if response.status_code == 200:
+            return response.json()
+        elif response.status_code == 404:
+            return []
+        else:
+            return None
+    except Exception as e:
+        log(f"  Wellness API error: {e}", "WARNING")
+        return None
+
+
+def insert_wellness_to_supabase(records: List[Dict], dry_run: bool = False) -> bool:
+    """Insert wellness data to Supabase using UPSERT (prevents duplicates)."""
+    if not records:
+        return True
+
+    if dry_run:
+        log(f"  [DRY RUN] Would upsert {len(records)} wellness records")
+        return True
+
+    try:
+        # Use Supabase REST API for upsert
+        url = f"{SUPABASE_URL}/rest/v1/wellness"
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates"  # UPSERT behavior
+        }
+
+        response = requests.post(url, headers=headers, json=records, timeout=30)
+
+        if response.status_code in (200, 201):
+            return True
+        else:
+            log(f"  Wellness upsert error: {response.status_code} - {response.text[:100]}", "ERROR")
+            return False
+    except Exception as e:
+        log(f"  Wellness insert error: {e}", "ERROR")
+        return False
+
+
+def import_wellness_for_date(athletes: List[Dict], target_date: str, dry_run: bool = False):
+    """
+    Import wellness for ALL athletes for a specific date.
+    Called at end of every ingestion run.
+    Uses UPSERT - safe to run multiple times per day.
+    """
+    log(f"\n{Colors.CYAN}{'='*60}{Colors.END}")
+    log(f"{Colors.CYAN}{Colors.BOLD}WELLNESS IMPORT: {target_date}{Colors.END}")
+    log(f"{Colors.CYAN}{'='*60}{Colors.END}")
+
+    wellness_count = 0
+    wellness_success = 0
+
+    for athlete in athletes:
+        wellness_data = get_wellness_data(athlete, target_date)
+
+        if wellness_data:
+            records = [transform_wellness_record(r, athlete['id']) for r in wellness_data]
+            if insert_wellness_to_supabase(records, dry_run):
+                wellness_count += len(records)
+                wellness_success += 1
+                log(f"  ✓ {athlete['name']}: wellness imported", "SUCCESS")
+            else:
+                log(f"  ✗ {athlete['name']}: wellness insert failed", "ERROR")
+        else:
+            log(f"  - {athlete['name']}: no wellness data for {target_date}")
+
+    log(f"\n{Colors.BOLD}Wellness Summary:{Colors.END}")
+    log(f"  Athletes with wellness: {wellness_success}/{len(athletes)}")
+    log(f"  Records processed: {wellness_count}")
+
+
 def print_summary():
     """Résumé final (Phase 1 Enhanced)"""
     print(f"\n{Colors.BLUE}{'='*70}{Colors.END}")
@@ -1668,6 +1817,10 @@ def main():
             days_back_max=args.backfill_max_days,
             dry_run=False
         )
+
+    # Import today's wellness for ALL athletes (regardless of activities)
+    today = datetime.now().strftime("%Y-%m-%d")
+    import_wellness_for_date(athletes, today, args.dry_run)
 
     # Phase 2: Refresh materialized view after data import
     if not args.dry_run and stats['activities_processed'] > 0:
