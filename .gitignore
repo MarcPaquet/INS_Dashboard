@@ -58,3 +58,5 @@ DIAGRAM_CONTEXT.md
 rsconnect-python/
 .python-version
 start_dashboard.sh
+deploy_shinyapps.sh
+supabase/
