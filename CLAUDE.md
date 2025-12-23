@@ -220,6 +220,23 @@ Synchronized `complete_database_schema.sql` with the actual production database 
 | Tables (14) | athlete, users, activity_metadata, activity, activity_intervals, wellness, personal_records, personal_records_history, athlete_training_zones, daily_workout_surveys, weekly_wellness_surveys, lactate_tests, activity_zone_time, weekly_monotony_strain |
 | Mat. Views (2) | activity_pace_zones, weekly_zone_time |
 
+---
+
+**Phase 2W: Zone Configuration Change Indicator - DEPLOYED**
+
+When a user selects a date range that spans multiple zone configurations (e.g., zones changed on Dec 12), the dashboard now:
+1. Shows an info banner explaining that zone boundaries changed
+2. Displays vertical dashed lines on graphs where zones changed
+
+**New Code:**
+- `get_zone_changes_in_range()` function (lines 508-561): Queries `athlete_training_zones` for changes within date range
+- `zone_change_banner` UI render function: Displays styled info message
+- Vertical lines added to `zone_time_longitudinal()` and `monotony_strain_graph()`
+
+**Status:** Deployed to production.
+
+---
+
 **Previous Session (Dec 22, 2025):**
 - Phase 2V: Pre-calculated Monotony & Strain
 - Migration executed, backfill completed (111 weeks, 5 athletes)
@@ -274,9 +291,10 @@ except: calculate_from_records()
 
 ## NOW - Immediate Priorities
 
-### 🔴 Priority 1: AWS Setup for Automation
+### 🟡 Priority 1: AWS Setup for Automation - IN PROGRESS
 
 **Goal:** Automated daily ingestion + one-time bulk historical import
+**Status:** Marc has started AWS setup (Dec 23, 2025)
 
 | Task | Service | Status |
 |------|---------|--------|
@@ -326,7 +344,34 @@ All changes committed and pushed to GitHub:
 ### Dashboard Enhancements
 - Intervals visualization tab (temporarily removed)
 - Configurable moving averages
-- Wellness recap window
+
+### Wellness Tracking Window
+- Configurable recap window for wellness data display
+- Allow users to set how far back to show wellness trends
+
+### Subjective Load Graph (RPE × Time = Charge)
+**Concept:** ACL-ATL style graph using questionnaire data instead of objective metrics.
+
+**Formula:**
+- Charge = RPE × Duration (minutes)
+- This is Foster's sRPE (session RPE) method
+
+**Graph Structure:**
+- X-axis: Date
+- Y-axis: Charge (arbitrary units)
+- ACL line: 7-day EWM of daily total Charge
+- ATL line: 28-day EWM of daily total Charge
+- Optional: TSB = ATL - ACL
+
+**Data Sources:**
+- `daily_workout_surveys.rpe` (1-10 scale)
+- `activity_metadata.duration_sec` / 60 = minutes
+- Join via activity_id
+
+**Notes:**
+- Complements objective CTL/ATL with subjective perception
+- Useful for detecting overtraining (high objective load + high subjective load)
+- Requires surveys to be filled consistently
 
 ---
 
@@ -959,6 +1004,27 @@ When athletes link Strava instead of watch, Strava strips Stryd biomechanics dat
   1. Run `create_weekly_monotony_strain.sql` in Supabase
   2. Run `SELECT * FROM backfill_monotony_strain();`
 
+### Phase 2W: Zone Configuration Change Indicator (Dec 23, 2025) ✅
+- **Problem Solved** - When viewing a date range that spans multiple zone configs:
+  - Zone boundaries changed mid-period (e.g., Z1 = "3:15+" until Dec 12, then "3:05+")
+  - Data was calculated correctly (temporal matching) but user had no visual indication
+  - Could misinterpret graphs thinking same zone boundaries applied throughout
+- **Solution Implemented:**
+  - `get_zone_changes_in_range()` function: Queries `athlete_training_zones` for changes within date range
+  - `zone_change_banner` UI: Styled info banner showing when/how often zones changed
+  - Vertical dashed lines on `zone_time_longitudinal` and `monotony_strain_graph`
+  - Lines labeled "Zones modifiees" at each config change date
+- **UX Impact:**
+  - Users now see clear visual indicator of zone boundary changes
+  - French message explains the change dates
+  - Graphs show vertical reference lines for context
+- **Code Changes (supabase_shiny.py):**
+  - Lines 503-561: `get_zone_changes_in_range()` with caching
+  - Lines 3923-3966: `zone_change_banner` render function
+  - Lines 4200-4214: Vertical lines in zone longitudinal graph
+  - Lines 4334-4348: Vertical lines in monotony/strain graph
+  - UI placeholder at line 2377
+
 ---
 
 ## 📝 QUICK REFERENCE
@@ -1090,11 +1156,11 @@ SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem rsc
 
 ## 📅 KNOWN ISSUES & NEXT PRIORITIES
 
-### 🔴 Remaining Issues
+### ✅ Recently Fixed
 
 | Feature | Issue | Status |
 |---------|-------|--------|
-| **Daily Questionnaire** | Cannot select training from dropdown | ⏳ Pending |
+| **Daily Questionnaire** | Cannot select training from dropdown | ✅ Fixed (Dec 23, 2025) |
 
 ### ✅ Recently Fixed (Dec 2025)
 
@@ -1116,4 +1182,4 @@ SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem rsc
 
 **END OF DOCUMENT**
 
-*Last Updated: December 22, 2025*
+*Last Updated: December 23, 2025*

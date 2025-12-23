@@ -500,6 +500,67 @@ def fetch_zones_for_date(athlete_id: str, target_date: date) -> pd.DataFrame:
     return result
 
 
+# Cache for zone changes within date range
+_zone_changes_cache = {}
+_ZONE_CHANGES_CACHE_TTL = 3600  # 1 hour
+
+
+def get_zone_changes_in_range(athlete_id: str, start_date: date, end_date: date) -> list[dict]:
+    """
+    Get list of zone configuration changes within a date range.
+
+    Returns list of dicts with:
+    - effective_from_date: Date when new zones became effective
+    - zones: List of zone configs that started on that date
+
+    Only returns dates WITHIN the range (not the initial zones before start_date).
+    """
+    import time as _time
+    now = _time.time()
+
+    # Check cache
+    cache_key = (athlete_id, start_date.isoformat(), end_date.isoformat())
+    if cache_key in _zone_changes_cache:
+        cached_time, cached_result = _zone_changes_cache[cache_key]
+        if now - cached_time < _ZONE_CHANGES_CACHE_TTL:
+            return cached_result
+
+    # Query zone configs where effective_from_date is WITHIN the range
+    # (not including zones that were already effective before start_date)
+    params = {
+        "athlete_id": f"eq.{athlete_id}",
+        "effective_from_date": f"gt.{start_date.isoformat()}",  # Strictly after start
+    }
+
+    df = supa_select("athlete_training_zones", select="*", params=params, limit=500)
+
+    if df.empty:
+        _zone_changes_cache[cache_key] = (now, [])
+        return []
+
+    # Filter to end_date
+    df["effective_from_date"] = pd.to_datetime(df["effective_from_date"])
+    df = df[df["effective_from_date"].dt.date <= end_date]
+
+    if df.empty:
+        _zone_changes_cache[cache_key] = (now, [])
+        return []
+
+    # Group by effective_from_date and collect zone changes
+    result = []
+    for eff_date, group in df.groupby("effective_from_date"):
+        result.append({
+            "effective_from_date": eff_date.date() if hasattr(eff_date, 'date') else eff_date,
+            "zones": group.to_dict('records')
+        })
+
+    # Sort by date
+    result = sorted(result, key=lambda x: x["effective_from_date"])
+
+    _zone_changes_cache[cache_key] = (now, result)
+    return result
+
+
 @timing_decorator
 def _fetch_timeseries_raw(activity_id: str, limit: int = 300000) -> pd.DataFrame:
     """Récupère (et met en cache disque) la série temporelle d'une activité."""
@@ -2313,6 +2374,7 @@ def dashboard_content_ui():
                         ),
                         style="margin-top: 1rem;"
                     ),
+                    ui.output_ui("zone_change_banner"),
                     ui.div(output_widget("zone_time_longitudinal"), style="margin-top: 1rem;"),
                     # Monotony & Strain section
                     ui.hr(style="margin: 1.5rem 0; border-color: #e5e7eb;"),
@@ -3858,6 +3920,51 @@ def server(input, output, session):
             inline=True
         )
 
+    @render.ui
+    def zone_change_banner():
+        """Show info banner when zone configuration changed within selected date range."""
+        try:
+            start_date = pd.to_datetime(input.date_start()).date()
+            end_date = pd.to_datetime(input.date_end()).date()
+        except Exception:
+            return None
+
+        if start_date > end_date:
+            start_date, end_date = end_date, start_date
+
+        # Get athlete ID
+        role = user_role.get()
+        if role == "coach":
+            athlete_name = input.athlete()
+            athlete_id = name_to_id.get(athlete_name)
+        else:
+            athlete_id = user_athlete_id.get()
+
+        if not athlete_id:
+            return None
+
+        # Check for zone changes
+        zone_changes = get_zone_changes_in_range(athlete_id, start_date, end_date)
+
+        if not zone_changes:
+            return None
+
+        # Build banner message
+        if len(zone_changes) == 1:
+            change_date = zone_changes[0]["effective_from_date"]
+            date_str = change_date.strftime("%d %B %Y") if hasattr(change_date, 'strftime') else str(change_date)
+            msg = f"Les zones d'entrainement ont change le {date_str}. Les activites avant cette date utilisent des limites differentes."
+        else:
+            dates = [c["effective_from_date"].strftime("%d %b") if hasattr(c["effective_from_date"], 'strftime') else str(c["effective_from_date"]) for c in zone_changes]
+            msg = f"Les zones d'entrainement ont change {len(zone_changes)} fois ({', '.join(dates)}). Chaque activite utilise les zones en vigueur a sa date."
+
+        # Return styled banner
+        return ui.div(
+            ui.tags.span("Info:", style="font-weight: 600; margin-right: 0.5rem;"),
+            msg,
+            style="background-color: #e0f2fe; border: 1px solid #7dd3fc; border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 0.5rem; color: #0369a1; font-size: 0.9rem;"
+        )
+
     @render_plotly
     def zone_time_longitudinal():
         """Render longitudinal zone time chart with multi-zone support and merge/distinct modes."""
@@ -4090,6 +4197,22 @@ def server(input, output, session):
         else:
             x_range = [first_week.strftime('%Y-%m-%d'), last_week.strftime('%Y-%m-%d')]
 
+        # Add vertical lines for zone configuration changes
+        zone_changes = get_zone_changes_in_range(athlete_id, start_date, end_date)
+        for change in zone_changes:
+            change_date = change["effective_from_date"]
+            date_str = change_date.strftime('%Y-%m-%d') if hasattr(change_date, 'strftime') else str(change_date)
+            fig.add_vline(
+                x=date_str,
+                line_dash="dash",
+                line_color="#6b7280",
+                line_width=1.5,
+                annotation_text="Zones modifiees",
+                annotation_position="top",
+                annotation_font_size=10,
+                annotation_font_color="#6b7280"
+            )
+
         fig.update_layout(
             autosize=True,
             title=dict(
@@ -4207,6 +4330,22 @@ def server(input, output, session):
 
         # Zone labels for title
         zone_labels = ", ".join([f"Z{z}" for z in selected_zones])
+
+        # Add vertical lines for zone configuration changes
+        zone_changes = get_zone_changes_in_range(athlete_id, start_date, end_date)
+        for change in zone_changes:
+            change_date = change["effective_from_date"]
+            date_str = change_date.strftime('%Y-%m-%d') if hasattr(change_date, 'strftime') else str(change_date)
+            fig.add_vline(
+                x=date_str,
+                line_dash="dash",
+                line_color="#6b7280",
+                line_width=1.5,
+                annotation_text="Zones",
+                annotation_position="top",
+                annotation_font_size=9,
+                annotation_font_color="#6b7280"
+            )
 
         fig.update_layout(
             autosize=True,
