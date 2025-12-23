@@ -2,7 +2,7 @@
 
 **Project:** Intervals.icu → Supabase Data Ingestion System
 **Team:** Saint-Laurent Sélect Running Club
-**Last Updated:** December 20, 2025
+**Last Updated:** December 23, 2025
 **Status:** ✅ **PRODUCTION LIVE** - https://insquebec-sportsciences.shinyapps.io/saintlaurentselect_dashboard/
 
 ---
@@ -168,49 +168,62 @@ Better Training Decisions
 | Weather Coverage | 100% (outdoor activities) |
 | HR Coverage | 100% (when monitor used) |
 
-### 🔧 Recent Session (Dec 22, 2025)
+### 🔧 Recent Session (Dec 23, 2025)
 
-**Phase 2V: Pre-calculated Monotony & Strain - COMPLETE & DEPLOYED**
+**Schema Sync & GitHub Update - COMPLETE**
 
-Pre-calculate weekly Training Monotony and Strain per zone in the database, eliminating dashboard computation.
+Synchronized `complete_database_schema.sql` with the actual production database and pushed all changes to GitHub.
 
 **What Was Done:**
-1. ✅ **SQL Migration** - `migrations/create_weekly_monotony_strain.sql`
-   - New table `weekly_monotony_strain` with per-zone metrics (6 zones + total)
-   - SQL function `calculate_monotony_strain_for_week(athlete_id, week_start)`
-   - Backfill function `backfill_monotony_strain()` for historical data
-   - Utility function `recalculate_monotony_strain_for_athlete(athlete_id)`
-   - **Bug Fix:** Renamed RETURNS TABLE columns with `out_` prefix and CTE aliases from `total` to `ztotal` to avoid PostgreSQL "ambiguous column reference" error
+1. ✅ **Schema Audit** - Verified database tables vs schema file
+   - Used Supabase REST API to check all 16 objects (14 tables + 2 views)
+   - Found 3 missing structures that existed in production but not in schema file
 
-2. ✅ **Python Integration** - `intervals_hybrid_to_supabase.py`
-   - Added `calculate_monotony_strain_for_week()` wrapper function (lines 1415-1455)
-   - Added `get_week_start()` helper for date → Monday conversion (lines 1458-1465)
-   - Called automatically after `calculate_zone_time_for_activity()` in `insert_to_supabase()`
+2. ✅ **Schema File Updated** - `complete_database_schema.sql`
+   - Added `activity_zone_time` table (Section 9)
+   - Added `weekly_zone_time` materialized view (Section 9B)
+   - Added zone time calculation functions (Section 9C):
+     - `calculate_zone_time_for_activity()`
+     - `refresh_all_zone_views()`
+     - `recalculate_all_zone_times()`
+   - Added `weekly_monotony_strain` table (Section 9D)
+   - Added monotony/strain calculation functions (Section 9E):
+     - `calculate_monotony_strain_for_week()`
+     - `backfill_monotony_strain()`
+   - Updated header with accurate table count and last updated date
 
-3. ✅ **Dashboard Update** - `supabase_shiny.py`
-   - Added cache variables `_monotony_strain_cache`, `_monotony_strain_cache_timestamp` (lines 649-652)
-   - Added `fetch_weekly_monotony_strain_from_db()` function with 1-hour TTL cache (lines 897-1009)
-   - Updated `monotony_strain_graph()` to use pre-calculated data first (lines 4167-4175)
-   - Falls back to on-the-fly calculation if no pre-calculated data
+3. ✅ **GitHub Push** - Commit `ec1c47b`
+   - 13 files changed, +5,920 lines / -1,169 lines
+   - All Phase 2O-2V changes now in repository
+   - 6 new migration files added
 
-4. ✅ **Migration Executed in Supabase**
-   - Table created: `weekly_monotony_strain`
-   - Backfill completed: 111 weeks processed, 5 athletes
-   - Data verified: Load 137-645 min/week, Monotony 0.7-2.1, Strain calculated correctly
+**Files Modified:**
+- `complete_database_schema.sql`: +600 lines (new sections 9-9E)
+- `CLAUDE.md`: Updated documentation
+- `supabase_shiny.py`: Phase 2M-2V updates
+- `intervals_hybrid_to_supabase.py`: Zone time + monotony integration
+- `requirements.txt`: Updated dependencies
 
-5. ✅ **Dashboard Deployed**
-   - Production URL: https://insquebec-sportsciences.shinyapps.io/saintlaurentselect_dashboard/
-   - App ID: 16149191
+**New Files Added:**
+- `app.py`: ShinyApps.io wrapper
+- `flow.md`: Data flow documentation
+- `migrations/create_activity_zone_time.sql`
+- `migrations/create_activity_zone_time_incremental.sql`
+- `migrations/create_weekly_zone_time.sql`
+- `migrations/create_weekly_monotony_strain.sql`
+- `migrations/create_lactate_tests.sql`
+- `migrations/insert_athlete_zones.sql`
 
-**Files Created/Modified:**
-- `migrations/create_weekly_monotony_strain.sql` (NEW - 435 lines)
-- `intervals_hybrid_to_supabase.py`: New functions (lines 1415-1465)
-- `supabase_shiny.py`: Cache + fetch function (lines 649-652, 897-1009), renderer update (lines 4167-4175)
+**Database Objects Verified (16 total):**
+| Type | Objects |
+|------|---------|
+| Tables (14) | athlete, users, activity_metadata, activity, activity_intervals, wellness, personal_records, personal_records_history, athlete_training_zones, daily_workout_surveys, weekly_wellness_surveys, lactate_tests, activity_zone_time, weekly_monotony_strain |
+| Mat. Views (2) | activity_pace_zones, weekly_zone_time |
 
-**Previous Session (Dec 20, 2025):**
-- Phase 2U: Training Monotony & Strain (Carl Foster Model)
-- Phase 2T: Tooltip Z-Index Fix
-- Phase 2S: Incremental Zone Time Calculation
+**Previous Session (Dec 22, 2025):**
+- Phase 2V: Pre-calculated Monotony & Strain
+- Migration executed, backfill completed (111 weeks, 5 athletes)
+- Dashboard deployed with pre-calculated data support
 
 ---
 
@@ -341,7 +354,9 @@ All changes committed and pushed to GitHub:
 
 ## 📊 DATABASE SCHEMA
 
-### Core Tables
+**Total: 14 Tables + 2 Materialized Views**
+
+### Core Tables (6)
 
 | Table | Purpose | Key Fields |
 |-------|---------|------------|
@@ -352,19 +367,35 @@ All changes committed and pushed to GitHub:
 | `activity_intervals` | Workout segments | activity_id, type, distance, moving_time, average_heartrate |
 | `wellness` | Daily wellness | athlete_id, date, hrv, sleep_quality, soreness |
 
-### Survey Tables
+### Survey Tables (2)
 
 | Table | Purpose |
 |-------|---------|
 | `daily_workout_surveys` | Post-workout RPE, satisfaction, goals |
 | `weekly_wellness_surveys` | BRUMS, REST-Q, OSLO metrics |
 
-### Configuration Tables
+### Configuration Tables (3)
 
 | Table | Purpose |
 |-------|---------|
 | `personal_records` | All-time best performances |
+| `personal_records_history` | Historical PR progression |
 | `athlete_training_zones` | Versioned HR/Pace/Lactate zones |
+
+### Pre-calculated Tables (3)
+
+| Table | Purpose |
+|-------|---------|
+| `activity_zone_time` | Zone time per activity (incremental calculation) |
+| `weekly_monotony_strain` | Carl Foster monotony/strain per week |
+| `lactate_tests` | Manual lactate test results |
+
+### Materialized Views (2)
+
+| View | Purpose |
+|------|---------|
+| `activity_pace_zones` | Pace zone distribution per activity |
+| `weekly_zone_time` | Zone time aggregated by week |
 
 ---
 
