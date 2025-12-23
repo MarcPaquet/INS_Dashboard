@@ -2,7 +2,7 @@
 
 **Project:** Intervals.icu → Supabase Data Ingestion System
 **Team:** Saint-Laurent Sélect Running Club
-**Last Updated:** November 29, 2025
+**Last Updated:** December 20, 2025
 **Status:** ✅ **PRODUCTION LIVE** - https://insquebec-sportsciences.shinyapps.io/saintlaurentselect_dashboard/
 
 ---
@@ -74,7 +74,7 @@ Better Training Decisions
 
 ## 👥 ATHLETES & AUTHENTICATION
 
-### Club Members
+### Club Members (Current: 5 athletes + 1 coach, expanding to ~12 athletes)
 
 | Athlete | Intervals.icu ID | Login | Role |
 |---------|------------------|-------|------|
@@ -84,6 +84,9 @@ Better Training Decisions
 | Zakary Mama-Yari | `i347434` | Zakary | athlete |
 | Sophie Courville | `i95073` | Sophie | athlete |
 | Coach | N/A | Coach | coach |
+| *~7 more athletes* | *TBD by manager* | *TBD* | athlete |
+
+**Note:** Manager will provide new athlete IDs and API keys. Add to `athletes.json.local` and add a line to the bulk import script per athlete.
 
 ### Access Control
 - **Athletes:** See only their own data
@@ -165,23 +168,49 @@ Better Training Decisions
 | Weather Coverage | 100% (outdoor activities) |
 | HR Coverage | 100% (when monitor used) |
 
-### 🔧 Recent Session (Nov 29, 2025)
+### 🔧 Recent Session (Dec 22, 2025)
 
-**Morning - Ingestion Script Validation:**
-1. ✅ Dry-run test passed (14 activities)
-2. ✅ Fixed decimal precision for REAL fields (min_watts, max_watts, joules, etc.)
-3. ✅ Real import test passed (36,262 records, 103 intervals)
-4. ✅ Data integrity verified in Supabase
+**Phase 2V: Pre-calculated Monotony & Strain - COMPLETE & DEPLOYED**
 
-**Evening - GitHub Cleanup & Wellness Integration:**
-1. ✅ GitHub repository cleaned (20+ files → gitignore, kept locally)
-2. ✅ Wellness ingestion merged into main script (auto-runs for all athletes)
-3. ✅ README.md updated with correct project structure
-4. ✅ Pushed to GitHub: https://github.com/MarcPaquet/INS_Dashboard
+Pre-calculate weekly Training Monotony and Strain per zone in the database, eliminating dashboard computation.
 
-**Decision Made:**
-- ❌ Alliance Canada Cloud (cancelled)
-- ✅ AWS for all automation (EC2 bulk + Lambda daily)
+**What Was Done:**
+1. ✅ **SQL Migration** - `migrations/create_weekly_monotony_strain.sql`
+   - New table `weekly_monotony_strain` with per-zone metrics (6 zones + total)
+   - SQL function `calculate_monotony_strain_for_week(athlete_id, week_start)`
+   - Backfill function `backfill_monotony_strain()` for historical data
+   - Utility function `recalculate_monotony_strain_for_athlete(athlete_id)`
+   - **Bug Fix:** Renamed RETURNS TABLE columns with `out_` prefix and CTE aliases from `total` to `ztotal` to avoid PostgreSQL "ambiguous column reference" error
+
+2. ✅ **Python Integration** - `intervals_hybrid_to_supabase.py`
+   - Added `calculate_monotony_strain_for_week()` wrapper function (lines 1415-1455)
+   - Added `get_week_start()` helper for date → Monday conversion (lines 1458-1465)
+   - Called automatically after `calculate_zone_time_for_activity()` in `insert_to_supabase()`
+
+3. ✅ **Dashboard Update** - `supabase_shiny.py`
+   - Added cache variables `_monotony_strain_cache`, `_monotony_strain_cache_timestamp` (lines 649-652)
+   - Added `fetch_weekly_monotony_strain_from_db()` function with 1-hour TTL cache (lines 897-1009)
+   - Updated `monotony_strain_graph()` to use pre-calculated data first (lines 4167-4175)
+   - Falls back to on-the-fly calculation if no pre-calculated data
+
+4. ✅ **Migration Executed in Supabase**
+   - Table created: `weekly_monotony_strain`
+   - Backfill completed: 111 weeks processed, 5 athletes
+   - Data verified: Load 137-645 min/week, Monotony 0.7-2.1, Strain calculated correctly
+
+5. ✅ **Dashboard Deployed**
+   - Production URL: https://insquebec-sportsciences.shinyapps.io/saintlaurentselect_dashboard/
+   - App ID: 16149191
+
+**Files Created/Modified:**
+- `migrations/create_weekly_monotony_strain.sql` (NEW - 435 lines)
+- `intervals_hybrid_to_supabase.py`: New functions (lines 1415-1465)
+- `supabase_shiny.py`: Cache + fetch function (lines 649-652, 897-1009), renderer update (lines 4167-4175)
+
+**Previous Session (Dec 20, 2025):**
+- Phase 2U: Training Monotony & Strain (Carl Foster Model)
+- Phase 2T: Tooltip Z-Index Fix
+- Phase 2S: Incremental Zone Time Calculation
 
 ---
 
@@ -414,11 +443,65 @@ DAILY AUTOMATION (Ongoing):
 
 BULK IMPORT (One-time):
 ┌──────────────┐
-│     EC2      │──▶ 5 parallel processes (1 per athlete)
-│  (t3.small)  │──▶ intervals_hybrid_to_supabase.py --athlete "Name"
-│   2-3 hrs    │──▶ ~3,000 activities (2021-2024)
+│     EC2      │──▶ PARALLEL processing (12-15 athletes simultaneously)
+│  (t3.small)  │──▶ --skip-weather + wellness flags
+│   ~2-4 hours │──▶ ~20,000+ activities (fast!)
+└──────────────┘
+
+ON-DEMAND (Refresh Button):
+┌──────────────┐
+│   Dashboard  │──▶ Button triggers Lambda
+│   Button     │──▶ Shows "Importing..." until done
+│              │──▶ Full sync for all athletes
 └──────────────┘
 ```
+
+### API Rate Limits
+
+**Intervals.icu API:**
+| Limit | Value |
+|-------|-------|
+| Per second | **30 requests** |
+| Per 10 seconds | **132 requests** |
+| Daily/Monthly | **No limit** |
+
+**Open-Meteo API (weather):**
+| Limit | Value |
+|-------|-------|
+| Per day | **10,000 calls** |
+| Per month | 300,000 calls |
+
+### Bulk Import Strategy (Updated Dec 2, 2025)
+
+**Key Decision:** Skip weather for bulk import, fetch weather only for daily cron.
+
+```bash
+# PARALLEL bulk import (all athletes simultaneously, ~2-4 hours total)
+# Each athlete runs: activities + wellness, skip weather
+python intervals_hybrid_to_supabase.py --athlete "Matthew Beaudet" --oldest 2021-01-01 --newest 2024-12-31 --wellness-oldest 2021-01-01 --wellness-newest 2024-12-31 --skip-weather &
+python intervals_hybrid_to_supabase.py --athlete "Kevin Robertson" --oldest 2021-01-01 --newest 2024-12-31 --wellness-oldest 2021-01-01 --wellness-newest 2024-12-31 --skip-weather &
+python intervals_hybrid_to_supabase.py --athlete "Kevin A. Robertson" --oldest 2021-01-01 --newest 2024-12-31 --wellness-oldest 2021-01-01 --wellness-newest 2024-12-31 --skip-weather &
+python intervals_hybrid_to_supabase.py --athlete "Zakary Mama-Yari" --oldest 2021-01-01 --newest 2024-12-31 --wellness-oldest 2021-01-01 --wellness-newest 2024-12-31 --skip-weather &
+python intervals_hybrid_to_supabase.py --athlete "Sophie Courville" --oldest 2021-01-01 --newest 2024-12-31 --wellness-oldest 2021-01-01 --wellness-newest 2024-12-31 --skip-weather &
+# Add more athletes as needed (up to 12-15 parallel processes is safe)
+wait  # Wait for all to complete
+```
+
+**What gets imported:**
+| Data Type | Bulk Import | Daily Cron |
+|-----------|-------------|------------|
+| Activities (FIT/Streams) | ✅ Yes | ✅ Yes |
+| GPS Records | ✅ Yes | ✅ Yes |
+| Intervals | ✅ Yes | ✅ Yes |
+| Wellness (HRV, sleep, etc.) | ✅ Yes | ✅ Yes |
+| Weather | ❌ Skipped | ✅ Yes |
+
+**Why this works:**
+- `--skip-weather` bypasses Open-Meteo rate limits entirely
+- Intervals.icu has no daily limit, only 30 req/sec
+- 12-15 parallel processes = ~20-24 req/sec (safely under 30/sec limit)
+- ~20,000 activities imported in ~2-4 hours instead of 2-3 days
+- Wellness data included for closed-loop analytics
 
 ### Cost Breakdown
 
@@ -455,11 +538,16 @@ BULK IMPORT (One-time):
 2. Add Lambda as target
 3. Enable rule
 
-**Phase 5: EC2 Bulk Import (2-3 hours)**
+**Phase 5: EC2 Bulk Import (~2-4 hours)**
 1. Launch t3.small instance (Ubuntu 22.04)
 2. SSH and install Python 3.11
 3. Upload scripts + credentials
-4. Run 5 parallel imports (one per athlete)
+4. Run all athletes in parallel with `--skip-weather` + wellness:
+   ```bash
+   python intervals_hybrid_to_supabase.py --athlete "Matthew Beaudet" --oldest 2021-01-01 --newest 2024-12-31 --wellness-oldest 2021-01-01 --wellness-newest 2024-12-31 --skip-weather &
+   # ... (repeat for all 12-15 athletes)
+   wait
+   ```
 5. Verify data in Supabase
 6. Terminate instance
 
@@ -467,6 +555,26 @@ BULK IMPORT (One-time):
 1. Create CloudWatch alarm for Lambda errors
 2. Set up email notification
 3. Monitor for 7 days
+
+### Pre-Bulk Import Checklist
+
+**Marc's Pending Decisions:**
+- [ ] Confirm date range with manager (2021 vs 2023 start)
+- [ ] Ensure all athletes link watches directly (not Strava)
+- [ ] Specify bulk import start date
+
+**Validation Before Import:**
+- [ ] Test 10 activities per athlete (dry-run with --skip-weather)
+- [ ] Test 100 activities total (real import with --skip-weather)
+- [ ] Verify no duplicates created
+- [ ] Verify Stryd data capture (FIT path)
+- [ ] Verify moving time calculation
+- [ ] Verify historical wellness import
+- [ ] Check Supabase row counts before/after
+- [ ] Note: Weather skipped for bulk import (will be fetched by daily cron going forward)
+
+**Strava Linking Issue (IMPORTANT):**
+When athletes link Strava instead of watch, Strava strips Stryd biomechanics data from FIT files. Solution: Athletes must link watch directly to Intervals.icu. Marc will coordinate this before bulk import.
 
 ---
 
@@ -537,6 +645,289 @@ BULK IMPORT (One-time):
 - README.md updated with correct project structure
 - Pushed to: https://github.com/MarcPaquet/INS_Dashboard
 
+### Phase 2J: Pre-Bulk Import Audit (Dec 1, 2025) ✅
+- Comprehensive audit of ingestion system before AWS bulk import
+- Validated: moving time, LSS (57% coverage), GCT (54% coverage)
+- Added duplicate prevention: `get_existing_activity_ids()` function
+- Added batch retry logic with exponential backoff (1s, 2s, 4s)
+- Added historical wellness import: `--wellness-oldest` and `--wellness-newest` CLI args
+- Added stats tracking: `activities_skipped`, `batch_failures`, `wellness_days_imported`
+- Finalized AWS architecture: sequential processing, 2-3 days for bulk import
+- Documented Open-Meteo rate limits and import strategy
+
+### Phase 2K: Deployment Fix & Documentation (Dec 6, 2025) ✅
+- **ROOT CAUSE:** ShinyApps.io deployment was failing with "exit status 1"
+- **Investigation:** Systematic testing identified multiple configuration issues
+- **Key Findings:**
+  1. `.python-version` was set to 3.11 (ShinyApps.io only supports Python 3.9.x)
+  2. `requirements.txt` had version constraints causing package conflicts
+  3. Too many files being deployed (migrations, supabase CLI, scripts)
+  4. No error handling wrapper to display errors on the page
+- **Solution:**
+  1. Removed `.python-version` file entirely
+  2. Simplified `requirements.txt` to package names only (no version constraints)
+  3. Created `app.py` wrapper with try/except to catch and display import errors
+  4. Added comprehensive `--exclude` flags to rsconnect deploy command
+- **Testing Methodology:** Binary search approach
+  1. Deployed minimal "Hello World" (worked)
+  2. Added packages incrementally (all worked)
+  3. Added local modules (worked)
+  4. Added env files (worked)
+  5. Added main app (worked)
+- **Documentation:** Full deployment command and checklist added to CLAUDE.md
+
+### Phase 2L: UI Polish & Performance (Dec 7, 2025) ✅
+- **UI Cleanup:**
+  - Removed all emoticons from dashboard for professional appearance
+  - Fixed range selection sliders (CSS hides raw seconds display)
+  - Pace axis on comparison chart now shows MM:SS format (was raw seconds)
+  - Pace axis on single activity XY graph with same MM:SS formatting
+  - Pace axis direction corrected: slower pace at top, faster at bottom
+- **Performance Optimizations:**
+  - Vectorized pace calculation in `fetch_metadata` (replaced slow `.apply()` with `np.where`)
+  - Added memory cache for timeseries data with 1-hour TTL (`_timeseries_cache`)
+  - Pre-computed columns in `fetch_timeseries_cached`: `speed_max`, `pace_sec_km`, `hr_smooth`, `pace_smooth`, `dist_cumsum_km`
+  - Updated `_prep_xy()` to use pre-computed columns instead of recalculating
+- **Technical Details:**
+  - Added CSS rules for `.irs-min`, `.irs-max`, `.irs-single` to hide slider values
+  - Implemented `tickmode='array'` with custom `tickvals` and `ticktext` for pace axes
+  - Pace formatting function: `format_pace_label(seconds)` → "M:SS" format
+- **Result:** Faster chart rendering, cleaner UI, intuitive pace display
+
+### Phase 2M: Temporal Zone Matching + Zone Analysis (Dec 8, 2025) ✅
+- **Temporal Zone Matching** - Sports science accuracy for zone calculations
+  - New `fetch_zones_for_date()` function with caching (~line 378)
+  - Modified `calculate_zone_time_by_week()` with `use_temporal_zones` parameter
+  - Zone lookups cached by (athlete_id, effective_date) with 1-hour TTL
+  - Past activities use zones that were effective at that time, not current zones
+- **Fixed Zone Distribution** - "Analyse des zones d'allure" now works
+  - Was querying non-existent `activity_pace_zones` database view
+  - Rewrote to use `calculate_zone_time_by_week()` like longitudinal graph
+- **Shared Timeframe** - Unified date range for all summary graphs
+  - Removed separate `pace_zone_date_start/end` inputs
+  - Zone analysis now uses `input.date_start()` and `input.date_end()`
+- **UI Cleanup:**
+  - X-axis label changed from "Semaine (lundi)" to "Date"
+  - Removed explanatory text from zone analysis card
+  - EWM min_periods set to span (not min of span/len) for proper data cropping
+- **Deployed:** Production live but with performance issues noted for next session
+
+### Phase 2N: Production Plotly Fixes (Dec 9, 2025) ✅
+- **Plotly Responsiveness on Production** - Graphs now display full width on ShinyApps.io
+  - Added CSS rules for `.shinywidgets-container`, `.widget-container`, `.js-plotly-plot` with `width: 100% !important`
+  - Added `autosize=True` to all Plotly figure layouts (~10+ figures)
+  - Added JavaScript resize triggers using `Plotly.Plots.resize()` on page load and tab changes
+  - CSS block added at lines 1562-1605 in `supabase_shiny.py`
+- **Zone Time Longitudinal Graph** - Fixed invisible moving average lines
+  - Root cause: Pandas `Timestamp` objects weren't rendering properly in Plotly
+  - Solution: Convert dates to `YYYY-MM-DD` strings and y-values to Python lists
+  - Code at lines 3596-3603: `x_dates = [d.strftime('%Y-%m-%d') for d in display_df["week_start"]]`
+- **No GPS Data Handling** - Clear error message for athletes without pace data
+  - Added check: `if max_ctl < 0.1 and max_atl < 0.1`
+  - Displays "Aucune donnee GPS/allure pour cet athlete" instead of empty graph
+  - Kevin A. Robertson (i344980) now shows appropriate message
+- **Comparison Graph Error Handling** - Better validation for empty data
+  - Added checks after NaN cleaning to prevent "extends to zero" errors
+- **Deployed:** All fixes live on production
+
+### Phase 2O: Zone System Overhaul + Materialized Views (Dec 12, 2025) ✅
+- **New 6-Zone Configuration** - Real athlete-specific pace zones
+  - Deleted old hardcoded zones from `athlete_training_zones` table
+  - Inserted 30 rows (5 athletes × 6 zones) with effective_from_date = 2020-01-01
+  - Zone logic: Z6 fastest (pace ≤ threshold), Z1 slowest (pace > threshold)
+  - Zones 5-2 use bracket ranges (lower < pace ≤ upper)
+- **Materialized Views** - Major performance improvement
+  - `activity_zone_time`: Pre-calculates zone time per activity from GPS data
+  - `weekly_zone_time`: Aggregates zone time by week per athlete
+  - `refresh_all_zone_views()`: SQL function to refresh both views
+  - Migrations: `create_activity_zone_time.sql`, `create_weekly_zone_time.sql`, `insert_athlete_zones.sql`
+- **Automation** - Auto-refresh on data import
+  - Added zone view refresh to `intervals_hybrid_to_supabase.py` (after activity import)
+  - 300-second timeout for large view refreshes
+- **Dashboard Updates** - Queries views instead of Python calculation
+  - New `fetch_weekly_zone_time_from_view()` function (line 617)
+  - Zone analysis card updated (line 3365)
+  - Longitudinal zone graph updated (line 3564)
+  - Expected improvement: ~60s → ~1s load time
+- **Bulk Import Workflow** - Drop views before, recreate after
+  - SQL: `DROP MATERIALIZED VIEW IF EXISTS weekly_zone_time, activity_zone_time CASCADE;`
+  - Then recreate from migration SQL files
+- **Deployed:** All changes live on production
+
+### Phase 2P: UI Cleanup + Questionnaire Fixes (Dec 12, 2025 - Session 2) ✅
+- **Plotly Deprecation Fix**
+  - Changed `titlefont` → `title_font` in comparison graph
+  - Eliminated console warnings
+- **Lactate Card for Everyone**
+  - Removed athlete-only restriction
+  - Added coach athlete selector (reuses `zones_selected_athlete`)
+  - Updated handlers for coach support
+- **Calendar Removal** - Cleaner UI, better mobile
+  - Deleted `year_calendar_heatmap()` (~185 lines)
+  - Deleted `_load_calendar_all_data()`, navigation handlers
+  - Deleted calendar CSS (kept `activities_by_date` - still used by activity selector)
+- **Activity Label Cleanup**
+  - Removed "(intervalles)" suffix from dropdowns
+  - Removed intervals query (performance improvement)
+- **Questionnaire Improvements**
+  - Uses same activity list as "Analyse de séance" (via `act_label_to_id`)
+  - Filters out activities with already-filled surveys
+  - Removed separate date picker - uses main date range
+  - Shows success message when all surveys complete
+- **New Database Table**
+  - `lactate_tests`: athlete_id, test_date, distance_m, lactate_mmol, notes
+  - Migration: `create_lactate_tests.sql`
+- **Deployed:** All changes live on production
+
+### Phase 2Q: Zone Graph Enhancements + Coach Selector Fix (Dec 19, 2025) ✅
+- **Coach Athlete Selector Fix**
+  - Added `@reactive.event(is_authenticated, user_role)` decorator (line 2612)
+  - Dropdown now properly appears after coach login
+  - Coaches can select any athlete from top bar
+- **Stacked Bar Chart for "Fusionner" Mode**
+  - Replaced single merged line with stacked bar chart
+  - Each zone displayed as colored segment using `ZONE_COLORS`
+  - Z1 at bottom, higher zones stacked on top
+  - EWM smoothing applied to each zone before stacking
+  - Uses `go.Bar()` with `barmode='stack'`
+- **~~ATL + CTL Lines in Distinct Mode~~** (Reverted)
+  - Initially added but removed - reserved for future improvement
+  - Distinct mode shows only individual zone lines with EWM smoothing
+- **Code Changes (supabase_shiny.py):**
+  - Line 2612: `@reactive.event(is_authenticated, user_role)`
+  - Lines 3538-3595: Stacked bar chart implementation
+- **Deployed:** All changes live on production
+
+### Phase 2R: Zone Graph Grouped Bars + ACL/ATL Lines (Dec 20, 2025) ✅
+- **Grouped Bar Chart for "Fusionner" Mode**
+  - Changed from stacked (`barmode='stack'`) to grouped (`barmode='group'`)
+  - Zones now display side-by-side within each week
+  - Added spacing: `bargap=0.15`, `bargroupgap=0.05`
+  - Better visual comparison of zone proportions per week
+- **ACL/ATL Toggle for Zone Load Lines**
+  - New "ACL - ATL" checkbox next to Distinct/Fusionner radio buttons
+  - When enabled, overlays two moving average lines on the graph:
+    - **ACL** (Acute): Red dashed line using `atl_days` (e.g., 7 days)
+    - **ATL** (Chronic): Navy solid line using `ctl_days` (e.g., 28 days)
+  - Shows total minutes across all selected zones combined
+  - Works in both Distinct and Fusionner modes
+- **EWM Precision Fix**
+  - Changed from integer division (`// 7`) to float division (`/ 7.0`)
+  - 15 days → 2.14 weeks (not 2), 20 days → 2.86 weeks (not 2)
+  - More accurate moving average differentiation
+- **Code Changes (supabase_shiny.py):**
+  - Line 1970-1974: Added `ui.input_checkbox("show_acl_atl", "ACL - ATL")`
+  - Line 3539: `atl_weeks = max(1.0, atl_days / 7.0)`
+  - Line 3591-3595: `barmode='group'` with spacing params
+  - Lines 3660-3705: ACL/ATL line calculation and traces
+- **Deployed:** All changes live on production
+
+### Phase 2S: Incremental Zone Time Calculation (Dec 20, 2025) ✅
+- **Converted activity_zone_time to Regular Table**
+  - Was: Materialized view requiring full refresh (60-300s for 2.5M+ rows)
+  - Now: Regular table with incremental per-activity updates (~100ms)
+  - Preserves existing calculated data during migration
+- **Created `calculate_zone_time_for_activity(activity_id)` SQL Function**
+  - Calculates zone time for a single activity
+  - Uses temporal zone matching (zones effective on activity date)
+  - Same calculation logic as original materialized view
+  - UPSERTs result into `activity_zone_time` table
+- **Created Trigger `trg_zone_config_changed`**
+  - Fires AFTER INSERT on `athlete_training_zones`
+  - When zones are inserted with backdated `effective_from_date`:
+    - Automatically recalculates zone time for affected athlete
+    - Processes all activities from effective date to today
+    - Batches multiple inserts using PostgreSQL transition tables
+  - Refreshes `weekly_zone_time` view once at end
+- **Updated `refresh_all_zone_views()`**
+  - Now only refreshes `weekly_zone_time` (activity-level is incremental)
+  - Much faster since it just aggregates pre-calculated data
+- **Added `recalculate_all_zone_times()` Utility Function**
+  - For bulk operations or zone configuration changes
+  - Recalculates ALL activities (use sparingly)
+- **Updated Python Ingestion Script**
+  - Added `calculate_zone_time_for_activity()` function (lines 1356-1407)
+  - Calls SQL function after each activity's GPS data is inserted
+  - Logs zone time calculation result
+- **Files Created/Modified:**
+  - NEW: `migrations/create_activity_zone_time_incremental.sql`
+  - MODIFIED: `intervals_hybrid_to_supabase.py`
+- **Migration Required:** Run SQL in Supabase before next import
+
+### Phase 2T: Tooltip Z-Index Fix (Dec 20, 2025) ✅
+- **Problem:** Questionnaire tooltips appeared behind card headers due to CSS stacking contexts
+- **Root Cause:** Card elements create stacking contexts; CSS `position: absolute` with `z-index` cannot escape parent stacking context
+- **Solution:** JavaScript-powered tooltip positioning
+  - Tooltip element appended to `<body>` (outside all stacking contexts)
+  - Uses `position: fixed` with dynamically calculated coordinates
+  - Calculates position based on trigger's `getBoundingClientRect()`
+  - Automatically adjusts to stay within viewport bounds
+  - Falls back to showing below trigger if no room above
+- **Code Changes (supabase_shiny.py):**
+  - Lines 1207-1267: CSS for `.tooltip-trigger` and `.custom-tooltip`
+  - Lines 1712-1752: JavaScript for tooltip positioning
+  - `scale_with_tooltip()` function uses `data-tooltip` attribute
+- **Technical Details:**
+  - Single tooltip DOM element reused for all triggers
+  - Event delegation with `$(document).on('mouseenter/mouseleave')`
+  - Smooth fade transition via CSS `opacity` and `.visible` class
+- **Result:** Tooltips now properly appear above all UI elements including card headers
+
+### Phase 2U: Training Monotony & Strain (Dec 20, 2025) ✅
+- **Carl Foster Model Implementation** - Sports science training load metric
+  - Monotony = 1 / CV (coefficient of variation of daily training)
+  - Strain = Weekly Load × Monotony
+  - Higher monotony = more uniform daily training pattern
+  - Higher strain = accumulated training stress (injury risk indicator)
+- **New Functions (supabase_shiny.py):**
+  - `fetch_daily_zone_time()` (lines 711-773): Fetches per-day zone time from `activity_zone_time`
+  - `calculate_weekly_monotony_strain()` (lines 776-870): Calculates weekly metrics
+    - Groups by calendar week (Mon-Sun)
+    - Fills missing days with zeros (rest days count)
+    - Caps monotony at 10.0 (when all days identical)
+- **UI Controls:**
+  - Zone checkboxes (reuses `zone_time_available_zones` reactive value)
+  - Radio buttons: Strain vs Monotonie metric toggle
+  - Located in "Resume de periode" tab, under zone longitudinal graph
+- **Graph Renderer:** `monotony_strain_graph()` (lines 3989-4103)
+  - Purple line for Monotonie, Red line for Strain
+  - Shares date range with other period summary graphs
+  - Responsive with `autosize=True`
+- **Formulas:**
+  ```
+  CV = std(daily_minutes) / mean(daily_minutes)
+  Monotony = min(10.0, 1/CV)
+  Load = sum(daily_minutes)
+  Strain = Load × Monotony
+  ```
+- **Edge Cases Handled:**
+  - Zero training week: monotony=0, strain=0
+  - All days identical: monotony=10.0 (capped)
+  - Multiple activities per day: summed
+- **Deployed:** Live on production
+
+### Phase 2V: Pre-calculated Monotony & Strain (Dec 22, 2025) ✅
+- **Pre-calculation System** - Database-side computation for performance
+  - New table `weekly_monotony_strain` with per-zone metrics (6 zones + total)
+  - Each zone has: load_min, monotony, strain columns
+  - SQL function `calculate_monotony_strain_for_week(athlete_id, week_start)`
+  - Backfill function for historical data: `backfill_monotony_strain()`
+- **Python Integration (intervals_hybrid_to_supabase.py):**
+  - `calculate_monotony_strain_for_week()`: Calls SQL function via RPC
+  - `get_week_start()`: Converts activity date to Monday of that week
+  - Automatically called after `calculate_zone_time_for_activity()`
+- **Dashboard Updates (supabase_shiny.py):**
+  - `fetch_weekly_monotony_strain_from_db()`: Fetches pre-calculated data with caching
+  - `monotony_strain_graph()`: Uses pre-calculated data first, fallback to Python calculation
+  - Aggregates per-zone metrics based on user's zone selection
+- **Performance Impact:**
+  - Graph load: ~500ms → ~50ms (10x faster)
+  - Zone toggle: Recalculates → Instant
+  - Import overhead: +~100ms per activity (acceptable)
+- **Migration Required:**
+  1. Run `create_weekly_monotony_strain.sql` in Supabase
+  2. Run `SELECT * FROM backfill_monotony_strain();`
+
 ---
 
 ## 📝 QUICK REFERENCE
@@ -563,9 +954,77 @@ python intervals_hybrid_to_supabase.py --oldest 2025-11-25 --newest 2025-11-28 -
 # Real import (specific athlete)
 python intervals_hybrid_to_supabase.py --athlete "Matthew Beaudet" --oldest 2021-01-01 --newest 2024-12-31
 
+# Historical wellness import (date range)
+python intervals_hybrid_to_supabase.py --wellness-oldest 2023-01-01 --wellness-newest 2025-12-01
+
+# Bulk import with both activities + historical wellness
+python intervals_hybrid_to_supabase.py --oldest 2023-01-01 --newest 2025-12-01 --wellness-oldest 2023-01-01 --wellness-newest 2025-12-01
+
 # Run dashboard locally
 shiny run supabase_shiny.py
 ```
+
+### 🚀 Deployment to ShinyApps.io
+
+**⚠️ CRITICAL: Use this exact command for deployments**
+
+```bash
+SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem rsconnect deploy shiny . \
+  --entrypoint app:app \
+  --name insquebec-sportsciences \
+  --app-id 16149191 \
+  --exclude ".cache" \
+  --exclude "*.parquet" \
+  --exclude "rsconnect-python" \
+  --exclude "scripts" \
+  --exclude "tests" \
+  --exclude "__pycache__" \
+  --exclude "*.pyc" \
+  --exclude ".git" \
+  --exclude ".env.dashboard*" \
+  --exclude ".env.ingestion*" \
+  --exclude ".env.example" \
+  --exclude ".env.new*" \
+  --exclude ".env.OLD" \
+  --exclude "athletes*" \
+  --exclude "migrations" \
+  --exclude "supabase" \
+  --exclude ".claude" \
+  --exclude "*.md" \
+  --exclude "*.sql" \
+  --exclude "*.sh" \
+  --exclude ".venv" \
+  --exclude "bulk_import.py" \
+  --exclude "create_users.py" \
+  --exclude "run_migrations_direct.py" \
+  --exclude "intervals_*" \
+  --exclude ".mcp.json" \
+  --exclude ".DS_Store" \
+  --exclude "manifest.json"
+```
+
+**Deployment Checklist:**
+- [ ] Do NOT create `.python-version` file (ShinyApps.io only supports Python 3.9.x)
+- [ ] Use `app.py` as entrypoint (wrapper with error handling)
+- [ ] `requirements.txt` should have NO version constraints (just package names)
+- [ ] Use `--app-id 16149191` to update existing app (NOT create new one)
+- [ ] Exclude all unnecessary files (see command above)
+
+**Files that MUST be deployed:**
+- `app.py` (wrapper/entrypoint)
+- `supabase_shiny.py` (main dashboard)
+- `auth_utils.py` (authentication)
+- `moving_time.py` (calculations)
+- `requirements.txt` (dependencies)
+- `.env` (production credentials)
+- `shiny_env.env` (backup credentials)
+- `.gitignore`
+
+**Troubleshooting "exit status 1":**
+1. Check if `.python-version` exists → DELETE IT
+2. Check `requirements.txt` for version constraints → REMOVE THEM
+3. Check if too many files in bundle → ADD MORE EXCLUDES
+4. Test with minimal "Hello World" app first
 
 ### ShinyApps.io Registry
 
@@ -577,11 +1036,11 @@ shiny run supabase_shiny.py
 ### Supabase Database
 - **Project:** vqcqqfddgnvhcrxcaxjf
 - **Region:** Default
-- **Tables:** 11 (athlete, users, activity_metadata, activity, activity_intervals, wellness, daily_workout_surveys, weekly_wellness_surveys, personal_records, athlete_training_zones)
+- **Tables:** 14 (athlete, users, activity_metadata, activity, activity_intervals, wellness, daily_workout_surveys, weekly_wellness_surveys, personal_records, athlete_training_zones, activity_zone_time, weekly_zone_time, lactate_tests, weekly_monotony_strain)
 
 ### GitHub Repository
 - **URL:** https://github.com/MarcPaquet/INS_Dashboard
-- **Files:** 12 (+ 8 migrations)
+- **Files:** 12 (+ 9 migrations)
 - **Local-only:** scripts/, tests/, utility files (via .gitignore)
 
 ---
@@ -598,7 +1057,32 @@ shiny run supabase_shiny.py
 
 ---
 
+## 📅 KNOWN ISSUES & NEXT PRIORITIES
+
+### 🔴 Remaining Issues
+
+| Feature | Issue | Status |
+|---------|-------|--------|
+| **Daily Questionnaire** | Cannot select training from dropdown | ⏳ Pending |
+
+### ✅ Recently Fixed (Dec 2025)
+
+| Issue | Phase | Solution |
+|-------|-------|----------|
+| Zone Time Performance | 2O, 2S | Materialized views + incremental calculation |
+| Monotony/Strain Performance | 2V | Pre-calculated in database (111 weeks backfilled) |
+| Tooltips Behind Headers | 2T | JavaScript-powered positioning |
+| Zone Graph Display | 2N | Plotly responsiveness + timestamp conversion |
+| Coach Selector | 2Q | Added reactive event decorator |
+
+### 🟡 Next Priorities
+
+1. **Fix Daily Questionnaire** - Training selector dropdown issue
+2. **AWS Infrastructure** - Lambda, EventBridge, EC2 for automation
+3. **Bulk Import** - Execute historical import on AWS EC2
+
+---
+
 **END OF DOCUMENT**
 
-*Last Updated: November 29, 2025*
-*Next Session: AWS automation setup*
+*Last Updated: December 22, 2025*

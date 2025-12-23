@@ -44,7 +44,7 @@ def timing_decorator(func):
         result = func(*args, **kwargs)
         elapsed = time.time() - start
         if elapsed > 0.1:  # Log if > 100ms
-            print(f"⏱️  {func.__name__}: {elapsed:.3f}s")
+            print(f"[TIMING] {func.__name__}: {elapsed:.3f}s")
         return result
     return wrapper
 
@@ -59,6 +59,22 @@ COLORS = {
 }
 
 RUN_TYPES = {"run", "trailrun", "virtualrun", "treadmill"}
+
+# Zone colors for distinct mode (consistent across sessions)
+# Gradient from blue (slowest/recovery) to red (fastest)
+ZONE_COLORS = {
+    1: "#3B82F6",  # Blue - Zone 1 (slowest/recovery)
+    2: "#06B6D4",  # Cyan - Zone 2
+    3: "#22C55E",  # Green - Zone 3
+    4: "#EAB308",  # Yellow - Zone 4
+    5: "#F97316",  # Orange - Zone 5
+    6: "#EF4444",  # Red - Zone 6 (fastest)
+    7: "#DC2626",  # Darker red - Zone 7
+    8: "#B91C1C",  # Even darker red - Zone 8
+    9: "#991B1B",  # Dark red - Zone 9
+    10: "#7F1D1D", # Darkest red - Zone 10
+}
+MERGED_ZONE_COLOR = "#8B5CF6"  # Purple for merged zones
 
 # Aliases robustes pour les selects UI (labels & valeurs -> codes canoniques)
 XVAR_ALIASES = {
@@ -84,7 +100,7 @@ YVAR_ALIASES = {
     "Oscillation verticale": "vertical_oscillation",
     "Altitude": "altitude",
     "Temps de contact au sol (GCT)": "ground_contact_time",
-    "Rigidité du ressort de jambe (LSS)": "leg_spring_stiffness",
+    "Leg Spring Stiffness (LSS)": "leg_spring_stiffness",
     "Aucun": "none",
 }
 
@@ -95,17 +111,29 @@ YVAR_ALIASES = {
 #   3. .env (production - shinyapps.io)
 env_files = [".env.dashboard.local", "shiny_env.env", ".env"]
 script_dir = os.path.dirname(os.path.abspath(__file__))
+print(f"[DEBUG] Script directory: {script_dir}")
+print(f"[DEBUG] Directory contents: {os.listdir(script_dir)}")
+
+env_loaded = False
 for env_file in env_files:
     env_path = os.path.join(script_dir, env_file)
+    print(f"[DEBUG] Checking: {env_path} - exists: {os.path.exists(env_path)}")
     if os.path.exists(env_path):
         load_dotenv(dotenv_path=env_path, override=True)  # Override shell variables
-        print(f"✅ Loaded environment from: {env_file}")
+        print(f"[OK] Loaded environment from: {env_file}")
+        env_loaded = True
         break
+
+if not env_loaded:
+    print("[WARN] No env file found, checking environment variables directly...")
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+print(f"[DEBUG] SUPABASE_URL set: {bool(SUPABASE_URL)}")
+print(f"[DEBUG] SUPABASE_KEY set: {bool(SUPABASE_KEY)}")
+
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError("SUPABASE_URL et SUPABASE_SERVICE_ROLE_KEY (ou ANON) doivent être définis dans .env")
+    raise RuntimeError(f"SUPABASE_URL et SUPABASE_SERVICE_ROLE_KEY (ou ANON) doivent être définis. script_dir={script_dir}, files={os.listdir(script_dir)}")
 
 # Fuseau horaire local pour l’agrégation hebdo
 LOCAL_TZ = os.getenv("INS_TZ", "America/Toronto")  # fuseau horaire local pour l’agrégation hebdo
@@ -257,13 +285,14 @@ def fetch_metadata(start_iso: str, end_iso: str, athlete_ids: list[str], limit: 
             "virtualrun": "Tapis"
         }).fillna("Autre")
 
-        # Compute distance_km, duration_min, pace_skm
+        # Compute distance_km, duration_min, pace_skm (VECTORIZED - 10x faster than .apply())
         df["distance_km"] = df["distance_m"] / 1000.0
         df["duration_min"] = df["duration_sec"] / 60.0
-        df["pace_skm"] = df.apply(
-            lambda row: (row["duration_sec"] / 60.0) / (row["distance_m"] / 1000.0)
-            if row["distance_m"] and row["distance_m"] > 0 else None,
-            axis=1
+        # Vectorized pace calculation - avoids slow row-by-row .apply()
+        df["pace_skm"] = np.where(
+            df["distance_m"] > 0,
+            df["duration_min"] / df["distance_km"],
+            np.nan
         )
     
     # Store in cache
@@ -299,6 +328,177 @@ def fetch_date_range(athlete_id: str, include_vrun: bool = True) -> tuple[date |
     dmin = dmin_ts.date()
     dmax = dmax_ts.date()
     return dmin, dmax
+
+def fetch_athlete_training_zones(athlete_id: str) -> pd.DataFrame:
+    """
+    Fetch the most recent pace zone configuration for an athlete.
+
+    Returns DataFrame with columns:
+    - zone_number (int): 1-6
+    - pace_min_sec_per_km (float): Lower bound (faster pace)
+    - pace_max_sec_per_km (float): Upper bound (slower pace)
+    - zone_label (str): Human-readable label like "Z1 (>5:30/km)"
+
+    Returns empty DataFrame if no zones configured.
+    """
+    params = {"athlete_id": f"eq.{athlete_id}"}
+    df = supa_select("athlete_training_zones", select="*", params=params, limit=100)
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # Find most recent effective_from_date
+    df["effective_from_date"] = pd.to_datetime(df["effective_from_date"])
+    most_recent = df["effective_from_date"].max()
+    df = df[df["effective_from_date"] == most_recent].copy()
+
+    # Note: Do NOT filter out zones with NULL pace boundaries
+    # Zone 6 (fastest) has pace_min=NULL, Zone 1 (slowest) has pace_max=NULL
+    # This is by design - boundary zones have open-ended ranges
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # Add human-readable labels
+    def format_pace(sec):
+        if sec is None or pd.isna(sec):
+            return "?"
+        sec = float(sec)
+        if sec >= 3600:
+            return "lent"
+        mins = int(sec // 60)
+        secs = int(sec % 60)
+        return f"{mins}:{secs:02d}"
+
+    def make_label(row):
+        zn = int(row["zone_number"])
+        pmin = row["pace_min_sec_per_km"]
+        pmax = row["pace_max_sec_per_km"]
+        pmin_is_null = pmin is None or pd.isna(pmin)
+        pmax_is_null = pmax is None or pd.isna(pmax)
+        # Zone 6 (fastest): pmin is NULL, show "<X:XX/km"
+        # Zone 1 (slowest): pmax is NULL, show ">X:XX/km"
+        if pmin_is_null and not pmax_is_null:
+            return f"Z{zn} (<{format_pace(pmax)}/km)"
+        elif pmax_is_null and not pmin_is_null:
+            return f"Z{zn} (>{format_pace(pmin)}/km)"
+        elif pmin_is_null and pmax_is_null:
+            return f"Z{zn}"
+        else:
+            return f"Z{zn} ({format_pace(pmin)}-{format_pace(pmax)}/km)"
+
+    df["zone_label"] = df.apply(make_label, axis=1)
+
+    return df.sort_values("zone_number")[["zone_number", "pace_min_sec_per_km", "pace_max_sec_per_km", "zone_label"]]
+
+
+# Cache for zone lookups by (athlete_id, effective_date) to avoid repeated DB queries
+_zone_by_date_cache = {}
+_ZONE_BY_DATE_CACHE_TTL = 3600  # 1 hour TTL
+
+
+def fetch_zones_for_date(athlete_id: str, target_date: date) -> pd.DataFrame:
+    """
+    Fetch training zones that were effective on a specific date.
+
+    This finds the most recent zone configuration that was in effect on target_date,
+    meaning effective_from_date <= target_date.
+
+    Args:
+        athlete_id: The athlete's ID
+        target_date: The date to find effective zones for
+
+    Returns DataFrame with columns:
+    - zone_number (int): 1-6
+    - pace_min_sec_per_km (float): Lower bound (faster pace)
+    - pace_max_sec_per_km (float): Upper bound (slower pace)
+    - zone_label (str): Human-readable label like "Z1 (>5:30/km)"
+    - effective_from_date: The date these zones became effective
+
+    Returns empty DataFrame if no zones exist for that date.
+    """
+    import time as _time
+    now = _time.time()
+
+    # Check cache first
+    cache_key = (athlete_id, target_date.isoformat())
+    if cache_key in _zone_by_date_cache:
+        cached_time, cached_df = _zone_by_date_cache[cache_key]
+        if now - cached_time < _ZONE_BY_DATE_CACHE_TTL:
+            return cached_df.copy()
+
+    # Query all zones for athlete where effective_from_date <= target_date
+    target_str = target_date.isoformat()
+    params = {
+        "athlete_id": f"eq.{athlete_id}",
+        "effective_from_date": f"lte.{target_str}"
+    }
+    df = supa_select("athlete_training_zones", select="*", params=params, limit=100)
+
+    if df.empty:
+        # No zones exist before this date - try to get earliest available zones
+        params_fallback = {"athlete_id": f"eq.{athlete_id}"}
+        df = supa_select("athlete_training_zones", select="*", params=params_fallback, limit=100)
+        if df.empty:
+            return pd.DataFrame()
+
+    # Find most recent effective_from_date that is <= target_date
+    df["effective_from_date"] = pd.to_datetime(df["effective_from_date"])
+
+    # Filter to dates <= target_date
+    df_filtered = df[df["effective_from_date"].dt.date <= target_date]
+
+    if df_filtered.empty:
+        # All zones are in the future - use earliest available
+        most_recent = df["effective_from_date"].min()
+    else:
+        most_recent = df_filtered["effective_from_date"].max()
+
+    df = df[df["effective_from_date"] == most_recent].copy()
+
+    # Note: Do NOT filter out zones with NULL pace boundaries
+    # Zone 6 (fastest) has pace_min=NULL, Zone 1 (slowest) has pace_max=NULL
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # Add human-readable labels
+    def format_pace(sec):
+        if sec is None or pd.isna(sec):
+            return "?"
+        sec = float(sec)
+        if sec >= 3600:
+            return "lent"
+        mins = int(sec // 60)
+        secs = int(sec % 60)
+        return f"{mins}:{secs:02d}"
+
+    def make_label(row):
+        zn = int(row["zone_number"])
+        pmin = row["pace_min_sec_per_km"]
+        pmax = row["pace_max_sec_per_km"]
+        pmin_is_null = pmin is None or pd.isna(pmin)
+        pmax_is_null = pmax is None or pd.isna(pmax)
+        # Zone 6 (fastest): pmin is NULL, show "<X:XX/km"
+        # Zone 1 (slowest): pmax is NULL, show ">X:XX/km"
+        if pmin_is_null and not pmax_is_null:
+            return f"Z{zn} (<{format_pace(pmax)}/km)"
+        elif pmax_is_null and not pmin_is_null:
+            return f"Z{zn} (>{format_pace(pmin)}/km)"
+        elif pmin_is_null and pmax_is_null:
+            return f"Z{zn}"
+        else:
+            return f"Z{zn} ({format_pace(pmin)}-{format_pace(pmax)}/km)"
+
+    df["zone_label"] = df.apply(make_label, axis=1)
+
+    result = df.sort_values("zone_number")[["zone_number", "pace_min_sec_per_km", "pace_max_sec_per_km", "zone_label", "effective_from_date"]]
+
+    # Cache the result
+    _zone_by_date_cache[cache_key] = (now, result.copy())
+
+    return result
+
 
 @timing_decorator
 def _fetch_timeseries_raw(activity_id: str, limit: int = 300000) -> pd.DataFrame:
@@ -379,10 +579,602 @@ def _fetch_timeseries_raw(activity_id: str, limit: int = 300000) -> pd.DataFrame
         pass
     return df
 
-@functools.lru_cache(maxsize=1024)
+# Memory cache for pre-computed timeseries data
+_timeseries_cache = {}
+_timeseries_cache_timestamp = {}
+TIMESERIES_CACHE_TTL = 3600  # 1 hour TTL
+
 def fetch_timeseries_cached(activity_id: str) -> pd.DataFrame:
-    """Cache mémoire sur la série d’une activité."""
-    return _fetch_timeseries_raw(activity_id)
+    """Cache mémoire sur la série d'une activité avec colonnes pré-calculées."""
+    now = time.time()
+
+    # Check memory cache first
+    if activity_id in _timeseries_cache:
+        cache_time = _timeseries_cache_timestamp.get(activity_id, 0)
+        if (now - cache_time) < TIMESERIES_CACHE_TTL:
+            return _timeseries_cache[activity_id].copy()
+
+    # Fetch raw data
+    df = _fetch_timeseries_raw(activity_id)
+    if df.empty:
+        return df
+
+    # PRE-COMPUTE commonly used columns (avoids recalculating on every render)
+    # 1. Speed proxy (max of available speed columns) - VECTORIZED
+    speed_cols = [c for c in ("speed", "enhanced_speed", "velocity_smooth") if c in df.columns]
+    if speed_cols:
+        speed_arrays = [pd.to_numeric(df[c], errors="coerce").fillna(0).values for c in speed_cols]
+        df["speed_max"] = np.maximum.reduce(speed_arrays) if len(speed_arrays) > 1 else speed_arrays[0]
+    else:
+        df["speed_max"] = 0.0
+
+    # 2. Pace in seconds per km (1000 / speed) - VECTORIZED
+    df["pace_sec_km"] = np.where(
+        df["speed_max"] > 0.1,  # Avoid division by zero, minimum ~0.1 m/s
+        1000.0 / df["speed_max"],
+        np.nan
+    )
+
+    # 3. Pre-smooth heartrate (most commonly displayed) - avoids smoothing on every render
+    if "heartrate" in df.columns:
+        hr_raw = pd.to_numeric(df["heartrate"], errors="coerce").to_numpy(dtype="float64")
+        df["hr_smooth"] = _smooth_nan(hr_raw, 21)
+
+    # 4. Pre-smooth pace - avoids smoothing on every render
+    df["pace_smooth"] = _smooth_nan(df["pace_sec_km"].values.astype("float64"), 21)
+
+    # 5. Cumulative distance in km (for distance-based X axis)
+    if "t_active_sec" in df.columns:
+        t_sec = pd.to_numeric(df["t_active_sec"], errors="coerce").fillna(0).values
+        dt = np.diff(t_sec, prepend=0)
+        dt = np.maximum(dt, 0)
+        df["dist_cumsum_km"] = np.cumsum(df["speed_max"].values * dt) / 1000.0
+
+    # Store in cache
+    _timeseries_cache[activity_id] = df.copy()
+    _timeseries_cache_timestamp[activity_id] = now
+
+    return df
+
+# Cache for zone time calculations (key: (athlete_id, start, end, selected_zones, use_temporal))
+_zone_time_cache = {}
+_zone_time_cache_timestamp = {}
+_ZONE_TIME_CACHE_TTL = 3600  # 1 hour TTL
+
+# Cache for daily zone time (used by monotony/strain calculation)
+_daily_zone_cache = {}
+_daily_zone_cache_timestamp = {}
+_DAILY_ZONE_CACHE_TTL = 3600  # 1 hour TTL
+
+# Cache for weekly monotony/strain (pre-calculated in database)
+_monotony_strain_cache = {}
+_monotony_strain_cache_timestamp = {}
+_MONOTONY_STRAIN_CACHE_TTL = 3600  # 1 hour TTL
+
+
+@timing_decorator
+def fetch_weekly_zone_time_from_view(
+    athlete_id: str,
+    start_date: date,
+    end_date: date
+) -> pd.DataFrame:
+    """
+    Fetch pre-calculated weekly zone time from materialized view.
+
+    This replaces the expensive calculate_zone_time_by_week() function by
+    querying the weekly_zone_time materialized view in Supabase.
+
+    Args:
+        athlete_id: Athlete ID (e.g., 'i344978')
+        start_date: Start date for the range
+        end_date: End date for the range
+
+    Returns DataFrame with columns:
+        - week_start (date): Monday of each week
+        - zone_1_minutes through zone_6_minutes
+        - total_minutes
+        - activity_count
+    """
+    # Query the materialized view with date range filter
+    # Note: Supabase REST API doesn't allow duplicate keys, so we use 'and' syntax
+    url = f"{SUPABASE_URL}/rest/v1/weekly_zone_time"
+    params = {
+        "athlete_id": f"eq.{athlete_id}",
+        "week_start": f"gte.{start_date.isoformat()}",
+        "order": "week_start.asc"
+    }
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}"
+    }
+
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=30)
+        if response.status_code != 200:
+            print(f"[ZONE_VIEW] Error fetching weekly_zone_time: {response.status_code}", flush=True)
+            return pd.DataFrame()
+
+        data = response.json()
+        if not data:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data)
+
+        # Convert week_start to date and filter by end_date
+        df["week_start"] = pd.to_datetime(df["week_start"]).dt.date
+        df = df[df["week_start"] <= end_date]
+
+        # Convert numeric columns from strings (Supabase returns NUMERIC as strings)
+        numeric_cols = ["zone_1_minutes", "zone_2_minutes", "zone_3_minutes",
+                       "zone_4_minutes", "zone_5_minutes", "zone_6_minutes",
+                       "total_minutes"]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+        return df
+
+    except Exception as e:
+        print(f"[ZONE_VIEW] Exception fetching weekly_zone_time: {e}", flush=True)
+        return pd.DataFrame()
+
+
+def fetch_daily_zone_time(
+    athlete_id: str,
+    start_date: date,
+    end_date: date
+) -> pd.DataFrame:
+    """
+    Fetch daily zone time from activity_zone_time table.
+    Groups multiple activities on the same day into daily totals.
+    Uses memory cache with 1-hour TTL to avoid repeated database queries.
+
+    Args:
+        athlete_id: Athlete ID (e.g., 'i344978')
+        start_date: Start date for the range
+        end_date: End date for the range
+
+    Returns DataFrame with columns:
+        - activity_date (date): The date
+        - zone_1_minutes through zone_6_minutes
+        - total_minutes
+    """
+    # Check cache first
+    cache_key = (athlete_id, start_date.isoformat(), end_date.isoformat())
+    now = time.time()
+    if cache_key in _daily_zone_cache:
+        cache_time = _daily_zone_cache_timestamp.get(cache_key, 0)
+        if (now - cache_time) < _DAILY_ZONE_CACHE_TTL:
+            return _daily_zone_cache[cache_key].copy()
+
+    url = f"{SUPABASE_URL}/rest/v1/activity_zone_time"
+    params = {
+        "select": "activity_date,zone_1_minutes,zone_2_minutes,zone_3_minutes,zone_4_minutes,zone_5_minutes,zone_6_minutes,total_zone_minutes",
+        "athlete_id": f"eq.{athlete_id}",
+        "activity_date": f"gte.{start_date.isoformat()}",
+        "order": "activity_date.asc"
+    }
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}"
+    }
+
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=30)
+        if response.status_code != 200:
+            print(f"[DAILY_ZONE] Error fetching activity_zone_time: {response.status_code}", flush=True)
+            return pd.DataFrame()
+
+        data = response.json()
+        if not data:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data)
+
+        # Convert activity_date to date and filter by end_date
+        df["activity_date"] = pd.to_datetime(df["activity_date"]).dt.date
+        df = df[df["activity_date"] <= end_date]
+
+        # Convert numeric columns
+        numeric_cols = ["zone_1_minutes", "zone_2_minutes", "zone_3_minutes",
+                       "zone_4_minutes", "zone_5_minutes", "zone_6_minutes",
+                       "total_zone_minutes"]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+        # Group by date (sum multiple activities on same day)
+        daily_df = df.groupby("activity_date")[numeric_cols].sum().reset_index()
+
+        # Cache the result
+        _daily_zone_cache[cache_key] = daily_df.copy()
+        _daily_zone_cache_timestamp[cache_key] = now
+
+        return daily_df
+
+    except Exception as e:
+        print(f"[DAILY_ZONE] Exception fetching activity_zone_time: {e}", flush=True)
+        return pd.DataFrame()
+
+
+def calculate_weekly_monotony_strain(
+    daily_zone_df: pd.DataFrame,
+    selected_zones: list,
+    start_date: date,
+    end_date: date
+) -> pd.DataFrame:
+    """
+    Calculate Training Monotony and Strain per calendar week (Mon-Sun).
+
+    Based on Carl Foster's model:
+    - CV = std(daily_minutes) / mean(daily_minutes)
+    - Monotony = 1 / CV (capped at 10.0)
+    - Load = sum(daily_minutes) for the week
+    - Strain = Load × Monotony
+
+    Args:
+        daily_zone_df: DataFrame from fetch_daily_zone_time()
+        selected_zones: List of zone numbers (1-6) to include
+        start_date: Start date for the analysis
+        end_date: End date for the analysis
+
+    Returns DataFrame with columns:
+        - week_start (date): Monday of each week
+        - load_min: Total training load in minutes
+        - monotony: Training monotony (1/CV, capped at 10)
+        - strain: Training strain (load × monotony)
+    """
+    if daily_zone_df.empty or not selected_zones:
+        return pd.DataFrame()
+
+    # Calculate total minutes for selected zones per day
+    zone_cols = [f"zone_{z}_minutes" for z in selected_zones]
+    available_cols = [c for c in zone_cols if c in daily_zone_df.columns]
+
+    if not available_cols:
+        return pd.DataFrame()
+
+    daily_df = daily_zone_df.copy()
+    daily_df["total_minutes"] = daily_df[available_cols].sum(axis=1)
+    daily_df["activity_date"] = pd.to_datetime(daily_df["activity_date"])
+
+    # Create week_start column (Monday of each week)
+    daily_df["week_start"] = daily_df["activity_date"] - pd.to_timedelta(
+        daily_df["activity_date"].dt.dayofweek, unit='D'
+    )
+
+    # Create full date range to include zero-training days
+    full_dates = pd.date_range(start_date, end_date, freq='D')
+    full_df = pd.DataFrame({"date": full_dates})
+    full_df["week_start"] = full_df["date"] - pd.to_timedelta(
+        full_df["date"].dt.dayofweek, unit='D'
+    )
+
+    # Merge with daily data (left join to keep all days)
+    full_df = full_df.merge(
+        daily_df[["activity_date", "total_minutes"]],
+        left_on="date",
+        right_on="activity_date",
+        how="left"
+    )
+    full_df["total_minutes"] = full_df["total_minutes"].fillna(0)
+
+    # Group by week and calculate metrics
+    results = []
+    for week_start, week_data in full_df.groupby("week_start"):
+        daily_values = week_data["total_minutes"].values
+
+        # Load = sum of daily minutes
+        load_min = daily_values.sum()
+
+        # Calculate CV and Monotony
+        mean_val = daily_values.mean()
+        std_val = daily_values.std(ddof=0)  # Population std
+
+        if mean_val > 0 and std_val > 0:
+            cv = std_val / mean_val
+            monotony = min(10.0, 1.0 / cv)  # Cap at 10
+        elif mean_val > 0 and std_val == 0:
+            # All days identical (std=0) → CV=0 → monotony capped at 10
+            monotony = 10.0
+        else:
+            # No training this week
+            monotony = 0.0
+
+        # Strain = Load × Monotony
+        strain = load_min * monotony
+
+        results.append({
+            "week_start": week_start.date() if hasattr(week_start, 'date') else week_start,
+            "load_min": load_min,
+            "monotony": monotony,
+            "strain": strain
+        })
+
+    return pd.DataFrame(results)
+
+
+def fetch_weekly_monotony_strain_from_db(
+    athlete_id: str,
+    start_date: date,
+    end_date: date,
+    selected_zones: list
+) -> pd.DataFrame:
+    """
+    Fetch pre-calculated weekly monotony/strain from the database.
+    Aggregates per-zone metrics based on selected zones.
+    Uses memory cache with 1-hour TTL.
+
+    Args:
+        athlete_id: Athlete ID (e.g., 'i344978')
+        start_date: Start date for the range
+        end_date: End date for the range
+        selected_zones: List of zone numbers (1-6) to aggregate
+
+    Returns DataFrame with columns:
+        - week_start (date): Monday of each week
+        - load_min: Aggregated load from selected zones
+        - monotony: Aggregated monotony (weighted by load)
+        - strain: Aggregated strain from selected zones
+    """
+    if not selected_zones:
+        return pd.DataFrame()
+
+    # Check cache first
+    cache_key = (athlete_id, start_date.isoformat(), end_date.isoformat(), tuple(sorted(selected_zones)))
+    now = time.time()
+    if cache_key in _monotony_strain_cache:
+        cache_time = _monotony_strain_cache_timestamp.get(cache_key, 0)
+        if (now - cache_time) < _MONOTONY_STRAIN_CACHE_TTL:
+            return _monotony_strain_cache[cache_key].copy()
+
+    url = f"{SUPABASE_URL}/rest/v1/weekly_monotony_strain"
+
+    # Build select columns based on selected zones
+    select_cols = ["week_start"]
+    for z in range(1, 7):
+        select_cols.extend([
+            f"zone_{z}_load_min",
+            f"zone_{z}_monotony",
+            f"zone_{z}_strain"
+        ])
+    select_cols.extend(["total_load_min", "total_monotony", "total_strain"])
+
+    params = {
+        "select": ",".join(select_cols),
+        "athlete_id": f"eq.{athlete_id}",
+        "week_start": f"gte.{start_date.isoformat()}",
+        "order": "week_start.asc"
+    }
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}"
+    }
+
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=30)
+        if response.status_code != 200:
+            print(f"[MONOTONY_STRAIN] Error fetching weekly_monotony_strain: {response.status_code}", flush=True)
+            return pd.DataFrame()
+
+        data = response.json()
+        if not data:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data)
+
+        # Convert week_start to date and filter by end_date
+        df["week_start"] = pd.to_datetime(df["week_start"]).dt.date
+        df = df[df["week_start"] <= end_date]
+
+        if df.empty:
+            return pd.DataFrame()
+
+        # Convert numeric columns
+        for col in df.columns:
+            if col != "week_start":
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+        # Aggregate selected zones
+        results = []
+        for _, row in df.iterrows():
+            # Sum load and strain from selected zones
+            load_sum = sum(row.get(f"zone_{z}_load_min", 0) for z in selected_zones)
+            strain_sum = sum(row.get(f"zone_{z}_strain", 0) for z in selected_zones)
+
+            # Calculate weighted monotony (weighted by load per zone)
+            weighted_monotony_sum = sum(
+                row.get(f"zone_{z}_load_min", 0) * row.get(f"zone_{z}_monotony", 0)
+                for z in selected_zones
+            )
+            monotony = weighted_monotony_sum / load_sum if load_sum > 0 else 0
+
+            results.append({
+                "week_start": row["week_start"],
+                "load_min": load_sum,
+                "monotony": monotony,
+                "strain": strain_sum
+            })
+
+        result_df = pd.DataFrame(results)
+
+        # Cache the result
+        _monotony_strain_cache[cache_key] = result_df.copy()
+        _monotony_strain_cache_timestamp[cache_key] = now
+
+        return result_df
+
+    except Exception as e:
+        print(f"[MONOTONY_STRAIN] Exception fetching weekly_monotony_strain: {e}", flush=True)
+        return pd.DataFrame()
+
+
+@timing_decorator
+def calculate_zone_time_by_week(
+    athlete_id: str,
+    zones_df: pd.DataFrame,
+    start_date: date,
+    end_date: date,
+    selected_zones: list[int],
+    use_temporal_zones: bool = True
+) -> pd.DataFrame:
+    """
+    Calculate weekly time spent in selected pace zones.
+    Uses memory cache to avoid recomputing for same parameters.
+
+    TEMPORAL ZONE MATCHING (use_temporal_zones=True):
+    Each activity uses the zones that were effective on that activity's date.
+    This ensures sports science accuracy - you can't analyze past data with future test results.
+
+    Args:
+        athlete_id: Athlete ID
+        zones_df: DataFrame from fetch_athlete_training_zones() - used for selected_zones reference
+                  or as fallback when use_temporal_zones=False
+        start_date: Analysis start date
+        end_date: Analysis end date
+        selected_zones: List of zone numbers (1-6) to calculate
+        use_temporal_zones: If True, lookup zones per-activity date (default). If False, use zones_df for all.
+
+    Returns DataFrame with columns:
+    - week_start (date): Monday of each week
+    - zone_N_minutes (float): Time in zone N in minutes
+    """
+    if not selected_zones:
+        return pd.DataFrame()
+
+    # For non-temporal mode, zones_df is required
+    if not use_temporal_zones and zones_df.empty:
+        return pd.DataFrame()
+
+    import time as _time
+    now = _time.time()
+
+    # Build cache key - include use_temporal_zones flag
+    # For temporal mode, don't include zone bounds in key since they vary by date
+    if use_temporal_zones:
+        cache_key = (athlete_id, start_date.isoformat(), end_date.isoformat(), tuple(sorted(selected_zones)), "temporal")
+    else:
+        zone_bounds_tuple = tuple(sorted([
+            (int(row["zone_number"]), float(row["pace_min_sec_per_km"]), float(row["pace_max_sec_per_km"]))
+            for _, row in zones_df.iterrows()
+        ]))
+        cache_key = (athlete_id, start_date.isoformat(), end_date.isoformat(), zone_bounds_tuple)
+
+    # Check cache
+    if cache_key in _zone_time_cache:
+        cached_time, cached_df = _zone_time_cache[cache_key]
+        if now - cached_time < _ZONE_TIME_CACHE_TTL:
+            print(f"[ZONE_TIME] Cache hit for {athlete_id}", flush=True)
+            return cached_df.copy()
+
+    # 1. Get activity metadata for date range
+    start_iso = start_date.isoformat()
+    end_iso = end_date.isoformat()
+    meta_df = fetch_metadata(start_iso, end_iso, [athlete_id])
+
+    if meta_df.empty:
+        return pd.DataFrame()
+
+    # Filter to running activities only
+    meta_df = meta_df[meta_df["type"].str.lower().isin(RUN_TYPES)]
+
+    if meta_df.empty:
+        return pd.DataFrame()
+
+    # 2. Build zone boundaries lookup (for non-temporal mode)
+    if not use_temporal_zones:
+        zone_bounds = {}
+        for _, row in zones_df.iterrows():
+            zn = int(row["zone_number"])
+            if zn in selected_zones:
+                zone_bounds[zn] = (
+                    float(row["pace_min_sec_per_km"]),
+                    float(row["pace_max_sec_per_km"])
+                )
+        if not zone_bounds:
+            return pd.DataFrame()
+
+    # 3. Process activities and calculate zone times
+    results = []
+    # Cache for zones by effective date to avoid repeated lookups
+    zones_by_effective_date = {}
+
+    for _, act in meta_df.iterrows():
+        activity_id = act["activity_id"]
+
+        # Get activity date from start_time
+        start_time = act.get("start_time")
+        if pd.isna(start_time):
+            continue
+        act_date = pd.to_datetime(start_time).date()
+
+        # Calculate week start (Monday)
+        week_start = act_date - timedelta(days=act_date.weekday())
+
+        # TEMPORAL ZONE MATCHING: Fetch zones effective on activity date
+        if use_temporal_zones:
+            # Check local cache first
+            if act_date not in zones_by_effective_date:
+                act_zones_df = fetch_zones_for_date(athlete_id, act_date)
+                if act_zones_df.empty:
+                    continue
+                # Extract effective date for caching
+                eff_date = act_zones_df["effective_from_date"].iloc[0]
+                if isinstance(eff_date, pd.Timestamp):
+                    eff_date = eff_date.date()
+                # Build zone bounds for this effective date
+                act_zone_bounds = {}
+                for _, row in act_zones_df.iterrows():
+                    zn = int(row["zone_number"])
+                    if zn in selected_zones:
+                        act_zone_bounds[zn] = (
+                            float(row["pace_min_sec_per_km"]),
+                            float(row["pace_max_sec_per_km"])
+                        )
+                zones_by_effective_date[act_date] = act_zone_bounds
+
+            zone_bounds = zones_by_effective_date.get(act_date, {})
+            if not zone_bounds:
+                continue
+
+        # Fetch cached timeseries (already has pace_sec_km pre-computed)
+        ts_df = fetch_timeseries_cached(activity_id)
+
+        if ts_df.empty or "pace_sec_km" not in ts_df.columns:
+            continue
+
+        # Get valid pace values
+        pace = ts_df["pace_sec_km"].values
+        valid_mask = np.isfinite(pace)
+
+        if not np.any(valid_mask):
+            continue
+
+        pace_valid = pace[valid_mask]
+
+        # Calculate time in each zone (each row = 1 second of data)
+        row_result = {"week_start": week_start}
+        for zn, (pace_min, pace_max) in zone_bounds.items():
+            # pace_min = faster pace (lower seconds), pace_max = slower pace (higher seconds)
+            zone_mask = (pace_valid >= pace_min) & (pace_valid < pace_max)
+            # Store as minutes directly
+            row_result[f"zone_{zn}_minutes"] = zone_mask.sum() / 60.0
+
+        results.append(row_result)
+
+    if not results:
+        return pd.DataFrame()
+
+    # 4. Aggregate by week (sum minutes across activities in same week)
+    df = pd.DataFrame(results)
+    zone_cols = [c for c in df.columns if c.startswith("zone_")]
+    weekly = df.groupby("week_start")[zone_cols].sum().reset_index()
+
+    # Store in cache
+    _zone_time_cache[cache_key] = (now, weekly.copy())
+    print(f"[ZONE_TIME] Cached result for {athlete_id} ({len(weekly)} weeks)", flush=True)
+
+    return weekly
 
 # ========== Numpy helpers ==========
 def _np_max_cols(df: pd.DataFrame, cols: list[str]) -> np.ndarray:
@@ -435,88 +1227,103 @@ def _create_empty_plotly_fig(msg: str, height: int = 480) -> go.Figure:
 
 # ========== Préparation XY selon choix X/Y ==========
 def _prep_xy(df: pd.DataFrame, xvar: str, yvar: str, activity_type: str = "run", smooth_win: int = 21):
+    """Optimized XY preparation using pre-computed columns from cache."""
     n = len(df)
     if n == 0:
         return np.array([]), np.array([]), "", "", None, None
 
-    # Base time arrays (float64 for numeric stability)
-    if "ts_offset_ms" in df.columns and pd.to_numeric(df["ts_offset_ms"], errors="coerce").notna().any():
-        t_raw = pd.to_numeric(df["ts_offset_ms"], errors="coerce").to_numpy(dtype="float64") / 1000.0
-    else:
-        t_raw = pd.to_numeric(df.get("time"), errors="coerce").to_numpy(dtype="float64")
-    if t_raw.size:
-        t_raw = t_raw - t_raw[0]
-        t_raw = np.maximum(t_raw, 0.0)
-    else:
-        t_raw = np.zeros(n, dtype="float64")
-    dt = np.diff(t_raw, prepend=t_raw[:1])
-    dt = np.maximum(dt, 0.0)
-
-    # Speed proxy (m/s): row-wise max over available columns
-    spd_cols = [c for c in ("speed","enhanced_speed","velocity_smooth") if c in df.columns]
-    v = _np_max_cols(df, spd_cols)
-
     # Downsample step target (~1200 pts)
     step = max(1, n // 1200)
 
-    # X
+    # X AXIS - Use pre-computed columns when available
     if xvar == "moving":
-        # *** OPTIMISÉ : Utiliser t_active_sec de la BD (déjà calculé correctement) ***
-        # Fallback sur calcul client si colonne absente (rétrocompatibilité)
+        # Use t_active_sec from database (already calculated correctly)
         if "t_active_sec" in df.columns and df["t_active_sec"].notna().any():
             x_full = pd.to_numeric(df["t_active_sec"], errors="coerce").to_numpy(dtype="float64")
         else:
-            # Fallback: recalculer côté client
+            # Fallback: recalculate client-side
             x_full = compute_moving_time_strava(df, activity_type=activity_type).values
         x_label = "Temps en mouvement (mm:ss)"
         x_fmt = FuncFormatter(_fmt_mmss)
     else:
-        # distance intégrée (km)
-        dist = np.cumsum(np.nan_to_num(v) * dt) / 1000.0
-        x_full = dist
+        # Use pre-computed cumulative distance if available
+        if "dist_cumsum_km" in df.columns:
+            x_full = df["dist_cumsum_km"].values.astype("float64")
+        else:
+            # Fallback: calculate distance from speed
+            if "ts_offset_ms" in df.columns and pd.to_numeric(df["ts_offset_ms"], errors="coerce").notna().any():
+                t_raw = pd.to_numeric(df["ts_offset_ms"], errors="coerce").to_numpy(dtype="float64") / 1000.0
+            else:
+                t_raw = pd.to_numeric(df.get("time"), errors="coerce").to_numpy(dtype="float64")
+            if t_raw.size:
+                t_raw = t_raw - t_raw[0]
+                t_raw = np.maximum(t_raw, 0.0)
+            else:
+                t_raw = np.zeros(n, dtype="float64")
+            dt = np.diff(t_raw, prepend=t_raw[:1])
+            dt = np.maximum(dt, 0.0)
+            v = df["speed_max"].values if "speed_max" in df.columns else _np_max_cols(df, ["speed", "enhanced_speed", "velocity_smooth"])
+            x_full = np.cumsum(np.nan_to_num(v) * dt) / 1000.0
         x_label = "Distance (km)"
         x_fmt = None
 
-    # Y
+    # Y AXIS - Use pre-computed and pre-smoothed columns when available
     if yvar == "pace":
-        pace = 1000.0 / np.where(np.isfinite(v) & (v > 0), v, np.nan)
-        y_full = pace
+        # Use pre-smoothed pace if available (avoids smoothing every render)
+        if "pace_smooth" in df.columns:
+            y_full = df["pace_smooth"].values.astype("float64")
+        elif "pace_sec_km" in df.columns:
+            y_full = _smooth_nan(df["pace_sec_km"].values.astype("float64"), smooth_win)
+        else:
+            # Fallback: calculate from speed
+            v = df["speed_max"].values if "speed_max" in df.columns else _np_max_cols(df, ["speed", "enhanced_speed", "velocity_smooth"])
+            pace = 1000.0 / np.where(np.isfinite(v) & (v > 0), v, np.nan)
+            y_full = _smooth_nan(pace, smooth_win)
         y_label = "Allure (min/km)"
         y_fmt = FuncFormatter(_fmt_mmss)
+    elif yvar == "heartrate":
+        # Use pre-smoothed heartrate if available
+        if "hr_smooth" in df.columns:
+            y_full = df["hr_smooth"].values.astype("float64")
+        else:
+            y_full = _smooth_nan(pd.to_numeric(df.get("heartrate"), errors="coerce").to_numpy(dtype="float64"), smooth_win)
+        y_label = "Fréquence cardiaque"
+        y_fmt = None
     elif yvar == "cadence":
-        # La cadence provenant des appareils est souvent par jambe.
-        # On la multiplie par 2 pour obtenir la cadence totale (spm).
-        y_full = 2.0 * pd.to_numeric(df.get("cadence"), errors="coerce").to_numpy(dtype="float64")
+        # Cadence from devices is often per leg - multiply by 2 for total (spm)
+        y_full = _smooth_nan(2.0 * pd.to_numeric(df.get("cadence"), errors="coerce").to_numpy(dtype="float64"), smooth_win)
         y_label = "Cadence"
         y_fmt = None
     elif yvar == "watts":
-        y_full = pd.to_numeric(df.get("watts"), errors="coerce").to_numpy(dtype="float64")
+        y_full = _smooth_nan(pd.to_numeric(df.get("watts"), errors="coerce").to_numpy(dtype="float64"), smooth_win)
         y_label = "Puissance"
         y_fmt = None
     elif yvar == "vertical_oscillation":
-        y_full = pd.to_numeric(df.get("vertical_oscillation"), errors="coerce").to_numpy(dtype="float64")
+        y_full = _smooth_nan(pd.to_numeric(df.get("vertical_oscillation"), errors="coerce").to_numpy(dtype="float64"), smooth_win)
         y_label = "Oscillation verticale"
         y_fmt = None
     elif yvar == "altitude":
-        # Use enhanced_altitude column
-        y_full = pd.to_numeric(df.get("enhanced_altitude"), errors="coerce").to_numpy(dtype="float64")
+        y_full = _smooth_nan(pd.to_numeric(df.get("enhanced_altitude"), errors="coerce").to_numpy(dtype="float64"), smooth_win)
         y_label = "Altitude"
         y_fmt = None
     elif yvar == "ground_contact_time":
-        y_full = pd.to_numeric(df.get("ground_contact_time"), errors="coerce").to_numpy(dtype="float64")
+        y_full = _smooth_nan(pd.to_numeric(df.get("ground_contact_time"), errors="coerce").to_numpy(dtype="float64"), smooth_win)
         y_label = "Temps de contact au sol (GCT)"
         y_fmt = None
     elif yvar == "leg_spring_stiffness":
-        y_full = pd.to_numeric(df.get("leg_spring_stiffness"), errors="coerce").to_numpy(dtype="float64")
-        y_label = "Rigidité du ressort de jambe (LSS)"
+        y_full = _smooth_nan(pd.to_numeric(df.get("leg_spring_stiffness"), errors="coerce").to_numpy(dtype="float64"), smooth_win)
+        y_label = "Leg Spring Stiffness (LSS)"
         y_fmt = None
     else:
-        y_full = pd.to_numeric(df.get("heartrate"), errors="coerce").to_numpy(dtype="float64")
+        # Default to heartrate
+        if "hr_smooth" in df.columns:
+            y_full = df["hr_smooth"].values.astype("float64")
+        else:
+            y_full = _smooth_nan(pd.to_numeric(df.get("heartrate"), errors="coerce").to_numpy(dtype="float64"), smooth_win)
         y_label = "Fréquence cardiaque"
         y_fmt = None
 
-    # Smoothing then decimation
-    y_full = _smooth_nan(y_full, smooth_win)
+    # Decimation only (smoothing already done)
     x = x_full[::step]
     y = y_full[::step]
 
@@ -552,7 +1359,7 @@ top_bar = ui.div(
         # Toggle VirtualRun (colonne ~17%)
         ui.column(2, 
             ui.div(
-                ui.tags.label("⚙️ Options", **{"class": "form-label"}),
+                ui.tags.label("Options", **{"class": "form-label"}),
                 ui.input_checkbox("incl_vrun", "Inclure course sur tapis", value=True)
             )
         ),
@@ -639,6 +1446,41 @@ app_ui = ui.page_fluid(
         visibility: hidden !important;
         display: none !important;
       }
+
+      /* Range selection sliders - hide numeric seconds, show formatted time instead */
+      #range_start-label + .shiny-input-container .irs-min,
+      #range_start-label + .shiny-input-container .irs-max,
+      #range_start-label + .shiny-input-container .irs-single,
+      #range_end-label + .shiny-input-container .irs-min,
+      #range_end-label + .shiny-input-container .irs-max,
+      #range_end-label + .shiny-input-container .irs-single,
+      #range_start .irs-min,
+      #range_start .irs-max,
+      #range_start .irs-single,
+      #range_end .irs-min,
+      #range_end .irs-max,
+      #range_end .irs-single,
+      div[id*="range_start"] .irs-min,
+      div[id*="range_start"] .irs-max,
+      div[id*="range_start"] .irs-single,
+      div[id*="range_end"] .irs-min,
+      div[id*="range_end"] .irs-max,
+      div[id*="range_end"] .irs-single {
+        visibility: hidden !important;
+      }
+
+      /* Style the formatted time display */
+      #range_start_display,
+      #range_end_display {
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: #2563eb;
+        margin-top: 0.5rem;
+        padding: 0.4rem 0.8rem;
+        background: #eff6ff;
+        border-radius: 6px;
+        display: inline-block;
+      }
       
       /* Additional targeting for pseudo-elements */
       .survey-form .irs-from:before,
@@ -665,7 +1507,7 @@ app_ui = ui.page_fluid(
 
       /* Tooltip icon for questionnaire scales */
       .tooltip-trigger {
-        display: inline-block;
+        display: inline-flex;
         width: 20px;
         height: 20px;
         background: #D92323;
@@ -676,10 +1518,11 @@ app_ui = ui.page_fluid(
         text-align: center;
         cursor: help;
         font-weight: bold;
-        position: relative;
         margin-left: 0.4rem;
         transition: all 0.2s ease;
         vertical-align: middle;
+        justify-content: center;
+        align-items: center;
       }
 
       .tooltip-trigger:hover {
@@ -688,12 +1531,9 @@ app_ui = ui.page_fluid(
         box-shadow: 0 2px 8px rgba(217, 35, 35, 0.3);
       }
 
-      .tooltip-trigger::before {
-        content: attr(data-tooltip);
-        position: absolute;
-        bottom: 130%;
-        left: 50%;
-        transform: translateX(-50%);
+      /* Tooltip popup - positioned by JavaScript */
+      .custom-tooltip {
+        position: fixed;
         background: #333;
         color: white;
         padding: 0.75rem 1rem;
@@ -704,36 +1544,27 @@ app_ui = ui.page_fluid(
         word-wrap: break-word;
         max-width: 320px;
         min-width: 200px;
-        opacity: 0;
-        pointer-events: none;
-        transition: opacity 0.3s ease, transform 0.3s ease;
-        z-index: 1000;
+        z-index: 999999;
         line-height: 1.5;
         text-align: left;
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.2s ease;
       }
 
-      .tooltip-trigger::after {
+      .custom-tooltip.visible {
+        opacity: 1;
+      }
+
+      .custom-tooltip::after {
         content: '';
         position: absolute;
-        bottom: 120%;
+        top: 100%;
         left: 50%;
         transform: translateX(-50%);
         border: 7px solid transparent;
         border-top-color: #333;
-        opacity: 0;
-        transition: opacity 0.3s ease;
-        z-index: 1000;
-      }
-
-      .tooltip-trigger:hover::before,
-      .tooltip-trigger:hover::after {
-        opacity: 1;
-        pointer-events: auto;
-      }
-
-      .tooltip-trigger:hover::before {
-        transform: translateX(-50%) translateY(-5px);
       }
 
       /* Period grid */
@@ -861,18 +1692,17 @@ app_ui = ui.page_fluid(
         color: #374151;
       }
       
-      /* Enhanced cards */
-      .card { 
-        width: 100%; 
+      /* Enhanced cards - no transform to avoid stacking context issues with tooltips */
+      .card {
+        width: 100%;
         max-width: none;
         border: none;
         border-radius: 12px;
         box-shadow: 0 4px 6px rgba(0, 0, 0, 0.07), 0 1px 3px rgba(0, 0, 0, 0.06);
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
+        transition: box-shadow 0.2s ease;
         background: white;
       }
       .card:hover {
-        transform: translateY(-2px);
         box-shadow: 0 8px 12px rgba(0, 0, 0, 0.1), 0 2px 4px rgba(0, 0, 0, 0.08);
       }
       
@@ -886,7 +1716,7 @@ app_ui = ui.page_fluid(
         letter-spacing: 0.3px;
         border: none;
       }
-      
+
       .card-body {
         padding: 1.5rem;
       }
@@ -1007,35 +1837,56 @@ app_ui = ui.page_fluid(
         font-size: 1.05rem;
         padding: 0.5rem 1rem;
       }
-      
-      /* Calendar card - full width and larger */
-      .calendar-card {
-        width: 100% !important;
-        margin-bottom: 1.5rem;
-      }
-      
-      .calendar-card .card-header {
-        font-size: 1.25rem;
-      }
-      
-      .calendar-card .shiny-plot-output {
-        min-height: 280px;
-      }
-      
+
       /* Plotly text sizing */
       .plotly text {
         font-size: 13px !important;
       }
-      
+
       .plotly .xtick text, .plotly .ytick text {
         font-size: 12px !important;
       }
-      
+
       .plotly .gtitle {
         font-size: 16px !important;
         font-weight: 600 !important;
       }
-      
+
+      /* Hide leaked Plotly documentation text - comprehensive targeting */
+      .plotly-notifier,
+      [class*="plotly-notifier"],
+      .js-plotly-plot .plotly .modebar-container ~ div:not(.svg-container):not(.legend):not(.infolayer):not(.hoverlayer) {
+        display: none !important;
+        visibility: hidden !important;
+      }
+
+      /* Hide any text containing Plotly parameter documentation patterns */
+      /* This uses a parent selector approach for elements containing doc text */
+      .shinywidgets-container > div > div:not(.js-plotly-plot):not(.plotly) {
+        display: none !important;
+      }
+
+      /* Fix tooltip/popover/dropdown z-index - ensure they appear above everything */
+      .tooltip, .popover, [data-bs-toggle="tooltip"], [data-bs-toggle="popover"],
+      .bs-tooltip-auto, .bs-popover-auto, .tooltip-inner,
+      div[role="tooltip"], .shiny-input-container .tooltip,
+      .selectize-dropdown, .dropdown-menu, .bslib-popover {
+        z-index: 99999 !important;
+      }
+
+      /* Specifically for validation tooltips (red circles with info) */
+      .form-group .tooltip, .shiny-input-container .tooltip,
+      .bslib-tooltip-wrapper, [data-bslib-tooltip],
+      .bslib-tooltip-wrapper > .bslib-tooltip {
+        z-index: 99999 !important;
+      }
+
+      /* Ensure all popovers render above cards (card transform creates stacking context) */
+      .bslib-tooltip, .bslib-popover, [data-tippy-root],
+      .tippy-box, .tippy-content, .tippy-arrow {
+        z-index: 99999 !important;
+      }
+
       /* User info and logout styling */
       .user-info-container {
         display: flex;
@@ -1094,6 +1945,111 @@ app_ui = ui.page_fluid(
       .card {
         animation: fadeIn 0.4s ease-out;
       }
+
+      /* Hide Plotly internal documentation text that sometimes leaks through */
+      .plotly-notifier,
+      .plotly .plotly-notifier,
+      [class*="plotly"] .modebar-container ~ div:not(.plot-container):not(.main-svg),
+      .js-plotly-plot .plotly .user-select-none.svg-container ~ div:not(.modebar-container) {
+        display: none !important;
+      }
+
+      /* Hide any spurious text rendered outside of plot containers */
+      .shinywidgets-container > :not(div):not(script) {
+        display: none !important;
+      }
+
+      /* Hide leaked Plotly documentation text - target specific text patterns */
+      /* This targets text nodes that appear as siblings to plotly containers */
+      .widget-container > .widget-subarea ~ :not(.widget-subarea) {
+        display: none !important;
+      }
+
+      /* === PLOTLY RESPONSIVENESS FIX FOR SHINYAPPS.IO === */
+      /* Ensure shinywidgets containers expand to full width */
+      .shinywidgets-container,
+      .widget-container,
+      .widget-subarea,
+      .jupyter-widgets {
+        width: 100% !important;
+        max-width: 100% !important;
+      }
+
+      /* Make Plotly figures fill their containers */
+      .js-plotly-plot,
+      .plotly,
+      .plot-container {
+        width: 100% !important;
+      }
+
+      /* Ensure the main SVG container is responsive */
+      .js-plotly-plot .plotly .main-svg {
+        width: 100% !important;
+      }
+
+      /* Fix for card-body containing Plotly figures */
+      .card-body > div:has(.js-plotly-plot) {
+        width: 100% !important;
+      }
+
+      /* Ensure output_widget renders at full width */
+      [id*="_heatmap"],
+      [id*="_trend"],
+      [id*="_plot"],
+      [id*="_scatter"],
+      [id*="_volume"],
+      [id*="comparison_plot"],
+      [id*="zone_time"],
+      [id*="pie_types"] {
+        width: 100% !important;
+        min-width: 100% !important;
+      }
+
+      /* Force Plotly to recalculate on container resize */
+      .card .plotly-graph-div {
+        width: 100% !important;
+      }
+    """),
+    # Custom tooltip JavaScript - positions tooltips above triggers using fixed positioning
+    ui.tags.script("""
+        $(document).ready(function() {
+            // Create tooltip element once
+            var $tooltip = $('<div class="custom-tooltip"></div>').appendTo('body');
+
+            // Handle tooltip show on hover
+            $(document).on('mouseenter', '.tooltip-trigger', function(e) {
+                var text = $(this).data('tooltip');
+                if (!text) return;
+
+                $tooltip.text(text);
+
+                // Get trigger position
+                var rect = this.getBoundingClientRect();
+                var tooltipWidth = $tooltip.outerWidth();
+                var tooltipHeight = $tooltip.outerHeight();
+
+                // Position above the trigger, centered
+                var left = rect.left + (rect.width / 2) - (tooltipWidth / 2);
+                var top = rect.top - tooltipHeight - 10;
+
+                // Keep within viewport
+                if (left < 10) left = 10;
+                if (left + tooltipWidth > window.innerWidth - 10) {
+                    left = window.innerWidth - tooltipWidth - 10;
+                }
+                if (top < 10) top = rect.bottom + 10; // Show below if no room above
+
+                $tooltip.css({
+                    left: left + 'px',
+                    top: top + 'px'
+                }).addClass('visible');
+            });
+
+            // Handle tooltip hide
+            $(document).on('mouseleave', '.tooltip-trigger', function() {
+                $tooltip.removeClass('visible');
+            });
+        });
     """),
     # Load flatpickr CSS
     ui.tags.link(rel="stylesheet", href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css"),
@@ -1174,6 +2130,78 @@ app_ui = ui.page_fluid(
                 childList: true,
                 subtree: true
             });
+
+            // Hide leaked Plotly documentation text
+            function hideLeakedPlotlyText() {
+                // Find and hide text nodes containing Plotly parameter documentation
+                var walker = document.createTreeWalker(
+                    document.body,
+                    NodeFilter.SHOW_TEXT,
+                    null,
+                    false
+                );
+                while(walker.nextNode()) {
+                    var text = walker.currentNode.textContent.trim();
+                    // Only match very specific Plotly documentation patterns (avoid false positives)
+                    var isPlotlyDocs = (
+                        (text.includes('rangemode') && text.includes('tozero')) ||
+                        (text.includes('extrema of the input data') && text.includes('range')) ||
+                        (text.includes('extends to 0, regardless') && text.includes('input data')) ||
+                        (text.includes('Applies only to linear axes') && text.includes('scaleanchor'))
+                    );
+
+                    if (isPlotlyDocs && text.length > 50) {  // Only long doc strings
+                        var parent = walker.currentNode.parentNode;
+                        // Only hide the immediate parent, don't walk up the tree
+                        if (parent && parent.style && !parent.classList.contains('js-plotly-plot') &&
+                            !parent.classList.contains('plotly') && !parent.classList.contains('svg-container')) {
+                            parent.style.display = 'none';
+                            parent.style.visibility = 'hidden';
+                        }
+                    }
+                }
+            }
+
+            // Run on load and periodically (less aggressive)
+            setTimeout(hideLeakedPlotlyText, 2000);
+            setTimeout(hideLeakedPlotlyText, 5000);
+
+            // === PLOTLY RESPONSIVE FIX FOR SHINYAPPS.IO ===
+            // Force Plotly charts to resize to container width
+            function resizePlotlyCharts() {
+                var plots = document.querySelectorAll('.js-plotly-plot');
+                plots.forEach(function(plot) {
+                    if (plot && typeof Plotly !== 'undefined') {
+                        try {
+                            Plotly.Plots.resize(plot);
+                        } catch(e) {
+                            // Ignore resize errors
+                        }
+                    }
+                });
+            }
+
+            // Trigger resize on load and after a delay
+            setTimeout(resizePlotlyCharts, 500);
+            setTimeout(resizePlotlyCharts, 1500);
+            setTimeout(resizePlotlyCharts, 3000);
+
+            // Resize on window resize
+            var resizeTimer;
+            window.addEventListener('resize', function() {
+                clearTimeout(resizeTimer);
+                resizeTimer = setTimeout(resizePlotlyCharts, 250);
+            });
+
+            // Also resize when Shiny outputs update
+            $(document).on('shiny:value', function(event) {
+                setTimeout(resizePlotlyCharts, 100);
+            });
+
+            // Resize when tabs change (for hidden plots)
+            $(document).on('shown.bs.tab', function(e) {
+                setTimeout(resizePlotlyCharts, 100);
+            });
         });
     """),
     # Main dashboard content (conditionally shown after authentication)
@@ -1225,28 +2253,7 @@ def dashboard_content_ui():
             ),
             style="padding: 1.5rem 0;"
         ),
-        
-        # Year calendar visualization
-    ui.card(
-        ui.card_header(
-            ui.layout_columns(
-                ui.div("Vue annuelle des activités", style="font-weight: bold; font-size: 1.15rem;"),
-                ui.div(
-                    ui.input_action_button("prev_year", "◀", style="padding: 0.35rem 0.7rem; font-size: 1.05rem;"),
-                    ui.output_text("current_year_display", inline=True, container=ui.span),
-                    ui.input_action_button("next_year", "▶", style="padding: 0.35rem 0.7rem; font-size: 1.05rem;"),
-                    style="text-align: right; font-size: 1.1rem; font-weight: 600;"
-                ),
-                col_widths=[6, 6]
-            )
-        ),
-        ui.div(
-            output_widget("year_calendar_heatmap"),
-            style="overflow-x: auto; padding: 1rem;"
-        ),
-        class_="calendar-card"
-    ),
-    
+
     top_bar,
     ui.br(),
     ui.navset_tab(
@@ -1285,38 +2292,68 @@ def dashboard_content_ui():
                         col_widths=[4, 4, 4],
                     ),
                     ui.div(output_widget("run_duration_trend"), style="margin-top: 1rem;"),
+                    # Zone time longitudinal graph - same section, shares CTL/ATL controls
+                    ui.div(
+                        ui.tags.label("Zones d'allure", style="font-weight: 600; color: #374151; margin-top: 1.5rem; margin-bottom: 0.5rem; display: block;"),
+                        ui.output_ui("zone_time_checkboxes"),
+                        ui.div(
+                            ui.input_radio_buttons(
+                                "zone_display_mode",
+                                "",
+                                choices={"distinct": "Distinct", "merge": "Fusionner"},
+                                selected="distinct",
+                                inline=True
+                            ),
+                            ui.input_checkbox(
+                                "show_acl_atl",
+                                "ACL - ATL",
+                                value=False
+                            ),
+                            style="margin-top: 0.5rem; display: flex; align-items: center; gap: 1.5rem;"
+                        ),
+                        style="margin-top: 1rem;"
+                    ),
+                    ui.div(output_widget("zone_time_longitudinal"), style="margin-top: 1rem;"),
+                    # Monotony & Strain section
+                    ui.hr(style="margin: 1.5rem 0; border-color: #e5e7eb;"),
+                    ui.div(
+                        ui.tags.label("Monotonie / Strain (modele Carl Foster)", style="font-weight: 600; color: #374151; margin-bottom: 0.5rem; display: block;"),
+                        ui.output_ui("monotony_zone_checkboxes"),
+                        ui.div(
+                            ui.input_radio_buttons(
+                                "monotony_metric",
+                                "",
+                                choices={"strain": "Strain", "monotony": "Monotonie"},
+                                selected="strain",
+                                inline=True
+                            ),
+                            style="margin-top: 0.5rem;"
+                        ),
+                        style="margin-top: 1rem;"
+                    ),
+                    ui.div(output_widget("monotony_strain_graph"), style="margin-top: 1rem;"),
                     class_="analysis-unified"
                 ),
+            ),
+            # Pace zone analysis - right under Tendance course (uses shared date range)
+            ui.card(
+                ui.card_header("Analyse des zones d'allure"),
+                ui.output_ui("pace_zone_analysis"),
             ),
             # Three graphs in grid - full width
             ui.div({"class": "summary-grid-full"},
                 ui.card(
-                    ui.card_header("Répartition des types (temps total)"),
+                    ui.card_header("Repartition des types (temps total)"),
                     output_widget("pie_types"),
                 ),
                 ui.card(
-                    ui.card_header("Allure vs Fréquence cardiaque — par mois"),
+                    ui.card_header("Allure vs Frequence cardiaque — par mois"),
                     output_widget("pace_hr_scatter"),
                 ),
                 ui.card(
                     ui.card_header("Volume hebdomadaire"),
                     output_widget("weekly_volume"),
                 ),
-            ),
-            # Pace zone analysis - full width
-            ui.card(
-                ui.card_header("Analyse des zones d'allure"),
-                ui.div(
-                    ui.tags.label("Période d'analyse", style="font-weight: 600; color: #374151; margin-bottom: 0.5rem; display: block;"),
-                    ui.layout_columns(
-                        ui.input_date("pace_zone_date_start", "", value=start_default, width="100%"),
-                        ui.input_date("pace_zone_date_end", "", value=today, width="100%"),
-                        col_widths=[6, 6]
-                    ),
-                    style="padding: 1rem; background: #f9fafb; border-radius: 8px; margin-bottom: 1rem;"
-                ),
-                ui.output_ui("pace_zone_analysis"),
-                style="margin-top: 1.5rem;"
             ),
         ),
         ui.nav_panel("Analyse de séance",
@@ -1932,6 +2969,7 @@ def server(input, output, session):
     
     # Update athlete selector based on role
     @reactive.Effect
+    @reactive.event(is_authenticated, user_role)
     def update_athlete_selector():
         if not is_authenticated.get():
             return
@@ -1957,11 +2995,8 @@ def server(input, output, session):
     data_min_date = reactive.Value(None)  # Earliest date with data
     data_max_date = reactive.Value(None)  # Latest date with data
 
-    # Calendar heatmap state
-    current_calendar_year = reactive.Value(date.today().year)  # Current year for calendar display
-    selected_calendar_date = reactive.Value(None)  # Selected date from calendar
-    activities_by_date = reactive.Value({})  # date_str -> list of {activity_id, label} (filtered by date range)
-    calendar_all_activities = reactive.Value({})  # date_str -> count (ALL data, independent of filters)
+    # Activity by date mapping (used for activity selection)
+    activities_by_date = reactive.Value({})  # date_str -> list of {activity_id, label}
 
     # ========== COMPARISON TAB STATE ==========
     comparison_activity_id_1 = reactive.Value(None)
@@ -2011,64 +3046,6 @@ def server(input, output, session):
         # Exclure VirtualRun si toggle OFF
         return df.loc[df["type"].str.lower() != "virtualrun"].copy()
 
-    # Calendar year navigation
-    @reactive.Effect
-    @reactive.event(input.prev_year)
-    def _goto_prev_year():
-        """Navigate to previous year."""
-        current = current_calendar_year.get()
-        current_calendar_year.set(current - 1)
-    
-    @reactive.Effect
-    @reactive.event(input.next_year)
-    def _goto_next_year():
-        """Navigate to next year."""
-        current = current_calendar_year.get()
-        current_calendar_year.set(current + 1)
-
-    @output
-    @render.text
-    def current_year_display():
-        """Display current year."""
-        return str(current_calendar_year.get())
-    
-    # Load ALL activities for calendar (independent of date filters)
-    @reactive.Effect
-    @reactive.event(input.athlete)
-    @timing_decorator
-    def _load_calendar_all_data():
-        """Load ALL activities for selected athlete to show in calendar (no date filter)."""
-        try:
-            sel_name = input.athlete() or ""
-            athlete_id = name_to_id.get(sel_name, sel_name)
-            if not athlete_id:
-                calendar_all_activities.set({})
-                return
-            
-            # Fetch ALL running activities for this athlete (no date filter, exclude cross-training)
-            # Use activity_metadata table for better performance (Phase 2)
-            params = {
-                "athlete_id": f"eq.{athlete_id}",
-                "type": "in.(Run,TrailRun,VirtualRun)",
-                "order": "date.desc",
-            }
-            cols = "date,duration_sec"
-            df_all = supa_select("activity_metadata", select=cols, params=params, limit=50000)
-            
-            if df_all.empty:
-                calendar_all_activities.set({})
-                return
-            
-            # OPTIMIZATION: Use pandas groupby instead of manual loop (10-50x faster)
-            # Group by date and count activities
-            df_all["date_str"] = df_all["date"].astype(str)
-            by_date_count = df_all.groupby("date_str").size().to_dict()
-
-            calendar_all_activities.set(by_date_count)
-        except Exception as e:
-            print(f"Error loading calendar data: {e}")
-            calendar_all_activities.set({})
-
     def _update_activity_choices(df: pd.DataFrame):
         """Alimente le select 'activity_sel' avec toutes les activités de course (Run/TrailRun/VirtualRun)."""
         labels_map, info_map = {}, {}
@@ -2088,25 +3065,7 @@ def server(input, output, session):
                 dfr = dfr.sort_values("start_time", ascending=False)  # Plus récent en premier
                 dfr["date_str"] = pd.to_datetime(dfr["start_time"]).dt.date.astype(str)
 
-                # OPTIMIZATION 1: Fetch ALL intervals for ALL activities in ONE query (instead of N queries)
-                activity_ids = dfr["activity_id"].astype(str).tolist()
-                activities_with_intervals = set()
-                if activity_ids:
-                    try:
-                        # Single query to get all activities that have intervals
-                        intervals_query = supa_select(
-                            "activity_intervals",
-                            select="activity_id",
-                            params={"activity_id": f"in.({','.join(activity_ids)})"},
-                            limit=10000
-                        )
-                        if not intervals_query.empty:
-                            activities_with_intervals = set(intervals_query["activity_id"].astype(str).unique())
-                    except Exception as e:
-                        print(f"Warning: Could not fetch intervals data: {e}")
-                        activities_with_intervals = set()
-
-                # OPTIMIZATION 2: Vectorized date formatting using pandas operations
+                # Vectorized date formatting using pandas operations
                 mois_fr = ["janvier", "février", "mars", "avril", "mai", "juin",
                            "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
 
@@ -2136,22 +3095,12 @@ def server(input, output, session):
                 # Map type labels
                 dfr["type_fr"] = dfr["type"].str.lower().map(type_labels).fillna(dfr["type"])
 
-                # Check intervals presence
-                dfr["has_intervals"] = dfr["activity_id"].astype(str).isin(activities_with_intervals)
-
-                # Build labels vectorized
-                dfr["base_label"] = (
+                # Build labels vectorized (without intervals tag)
+                dfr["label"] = (
                     dfr["type_fr"] + " - " +
                     dfr["jour"].astype(str) + " " + dfr["mois_nom"] + " " + dfr["annee"].astype(str) + " - " +
                     dfr["time_str"] + " - " +
                     dfr["dist_str"] + " km"
-                )
-
-                # Add intervals tag where applicable
-                dfr["label"] = np.where(
-                    dfr["has_intervals"],
-                    dfr["base_label"] + " (intervalles)",
-                    dfr["base_label"]
                 )
 
                 # OPTIMIZATION 3: Build dictionaries using vectorized operations instead of iterrows
@@ -2370,6 +3319,7 @@ def server(input, output, session):
         ))
         
         fig.update_layout(
+            autosize=True,  # Responsive sizing for production
             title=dict(text="Moyenne pondérée exponentiellement — CTL / ATL / TSB", font=dict(size=16, color='#262626')),
             xaxis=dict(
                 title=dict(text="Date", font=dict(size=14)),
@@ -2441,6 +3391,7 @@ def server(input, output, session):
         )])
         
         fig.update_layout(
+            autosize=True,  # Responsive sizing for production
             title=dict(text="Répartition du temps (période sélectionnée)", font=dict(size=16, color='#262626')),
             height=500,
             showlegend=True,
@@ -2546,6 +3497,7 @@ def server(input, output, session):
         tick_text = [format_pace(v) for v in tick_vals]
         
         fig.update_layout(
+            autosize=True,  # Responsive sizing for production
             xaxis=dict(
                 title=dict(text="Allure (min/km)", font=dict(size=14)),
                 range=[210, 300],
@@ -2656,6 +3608,7 @@ def server(input, output, session):
         ))
         
         fig.update_layout(
+            autosize=True,  # Responsive sizing for production
             title=dict(text="Volume hebdomadaire par type (km)", font=dict(size=16, color='#262626')),
             xaxis=dict(
                 title="",
@@ -2681,122 +3634,107 @@ def server(input, output, session):
         )
         return fig
     
-    # Pace zone analysis
+    # Pace zone analysis (uses shared date range from date_start/date_end)
     @output
     @render.ui
-    @reactive.event(input.pace_zone_date_start, input.pace_zone_date_end, input.athlete, input.incl_vrun)
+    @reactive.event(input.date_start, input.date_end, input.athlete, input.incl_vrun)
     def pace_zone_analysis():
-        """Display time spent in each pace zone for the selected period using pre-calculated view"""
-        # Get pace zone specific date range
-        pace_start = pd.to_datetime(input.pace_zone_date_start() or date.today()).date()
-        pace_end = pd.to_datetime(input.pace_zone_date_end() or date.today()).date()
+        """Display time spent in each pace zone for the selected period using athlete's training zones"""
+        # Use shared date range (same as CTL/ATL and other summary graphs)
+        pace_start = pd.to_datetime(input.date_start() or date.today()).date()
+        pace_end = pd.to_datetime(input.date_end() or date.today()).date()
 
-        # Get all metadata and filter by pace zone dates
-        df_all = meta_df_all.get()
-        if df_all.empty:
+        # Get athlete's training zones
+        zones = zone_time_available_zones.get()
+        if not zones:
             return ui.div(
-                ui.tags.p("Aucune donnée disponible pour la période sélectionnée.",
+                ui.tags.p("Configurez les zones d'allure pour cet athlete.",
                          style="padding: 2rem; text-align: center; color: #666;")
             )
 
-        # Filter by pace zone date range
-        df = df_all.copy()
-        if not df.empty and "date_local" in df:
-            dates_local = df["date_local"].dt.date
-            mask_period = (dates_local >= pace_start) & (dates_local <= pace_end)
-            df = df.loc[mask_period].copy()
+        # Get athlete ID
+        role = user_role.get()
+        if role == "coach":
+            athlete_name = input.athlete()
+            athlete_id = name_to_id.get(athlete_name)
+        else:
+            athlete_id = user_athlete_id.get()
 
-        # Apply VirtualRun toggle
-        df = _apply_vrun_toggle(df)
-
-        if df.empty:
+        if not athlete_id:
             return ui.div(
-                ui.tags.p("Aucune donnée disponible pour la période sélectionnée.",
+                ui.tags.p("Aucun athlete selectionne.",
                          style="padding: 2rem; text-align: center; color: #666;")
             )
 
-        # Get activity IDs from current period
-        activity_ids = df["activity_id"].tolist()
-        if not activity_ids:
+        # Get all zone numbers
+        all_zone_nums = sorted([z["zone_number"] for z in zones])
+
+        # Fetch pre-calculated zone times from materialized view (much faster!)
+        weekly_df = fetch_weekly_zone_time_from_view(athlete_id, pace_start, pace_end)
+
+        if weekly_df.empty:
             return ui.div(
-                ui.tags.p("Aucune activité dans la période sélectionnée.",
+                ui.tags.p("Aucune donnée d'allure disponible pour cette période.",
                          style="padding: 2rem; text-align: center; color: #666;")
             )
-        
-        # Query pre-calculated pace zones view
-        try:
-            # Build filter for activity IDs
-            id_filter = ",".join([f'"{aid}"' for aid in activity_ids])
-            params = {"activity_id": f"in.({id_filter})"}
-            
-            df_zones = supa_select("activity_pace_zones", select="*", params=params, limit=10000)
-            
-            if df_zones.empty:
-                return ui.div(
-                    ui.tags.p("Aucune donnée d'allure disponible pour cette période.", 
-                             style="padding: 2rem; text-align: center; color: #666;")
-                )
-            
-            # Sum up zone times across all activities
-            zone_times = {
-                "<3:00": df_zones["zone_under_3_00"].sum(),
-                "3:00-3:15": df_zones["zone_3_00_3_15"].sum(),
-                "3:15-3:30": df_zones["zone_3_15_3_30"].sum(),
-                "3:30-3:45": df_zones["zone_3_30_3_45"].sum(),
-                "3:45-4:00": df_zones["zone_3_45_4_00"].sum(),
-                "4:00-4:15": df_zones["zone_4_00_4_15"].sum(),
-                "4:15-4:30": df_zones["zone_4_15_4_30"].sum(),
-                "4:30-4:45": df_zones["zone_4_30_4_45"].sum(),
-                "4:45-5:00": df_zones["zone_4_45_5_00"].sum(),
-                "5:00-5:15": df_zones["zone_5_00_5_15"].sum(),
-                "5:15-5:30": df_zones["zone_5_15_5_30"].sum(),
-                ">5:30": df_zones["zone_over_5_30"].sum()
-            }
-            total_time = df_zones["total_seconds"].sum()
-            
-        except Exception as e:
-            print(f"Error querying pace zones view: {e}")
+
+        # Sum all weeks to get total time per zone
+        zone_cols = [c for c in weekly_df.columns if c.startswith("zone_") and c.endswith("_minutes")]
+        zone_totals = {}
+        total_time_min = 0
+        for col in zone_cols:
+            zone_num = int(col.replace("zone_", "").replace("_minutes", ""))
+            total_min = weekly_df[col].sum()
+            zone_totals[zone_num] = total_min
+            total_time_min += total_min
+
+        if total_time_min == 0:
             return ui.div(
-                ui.tags.p("Erreur lors du chargement des zones d'allure. Assurez-vous que la vue 'activity_pace_zones' existe.", 
-                         style="padding: 2rem; text-align: center; color: #dc2626;")
-            )
-        
-        if total_time == 0:
-            return ui.div(
-                ui.tags.p("Aucune donnée d'allure disponible pour cette période.", 
+                ui.tags.p("Aucune donnée d'allure disponible pour cette période.",
                          style="padding: 2rem; text-align: center; color: #666;")
             )
-        
-        # Convert seconds to minutes and calculate percentages
+
+        # Build zone_data with labels from training zones
         zone_data = []
-        for label, time_sec in zone_times.items():
-            time_min = time_sec / 60
-            percentage = (time_sec / total_time) * 100 if total_time > 0 else 0
+        for zone_info in zones:
+            zn = zone_info["zone_number"]
+            time_min = zone_totals.get(zn, 0)
+            percentage = (time_min / total_time_min) * 100 if total_time_min > 0 else 0
             zone_data.append({
-                "zone": label,
+                "zone": zone_info["label"],
+                "zone_number": zn,
                 "time_min": time_min,
                 "percentage": percentage
             })
         
+        # Zone colors (matching longitudinal graph)
+        zone_colors = {
+            1: "#2E86AB",  # Blue - Recovery
+            2: "#28A745",  # Green - Aerobic
+            3: "#FFC107",  # Yellow - Tempo
+            4: "#FD7E14",  # Orange - Threshold
+            5: "#DC3545",  # Red - VO2max
+        }
+
         # Create visual bars
         rows = []
         max_time = max([z["time_min"] for z in zone_data]) if zone_data else 1
-        
+
         for data in zone_data:
             if data["time_min"] < 0.1:  # Skip zones with less than 6 seconds
                 continue
-            
+
             # Calculate bar width percentage
             bar_width = (data["time_min"] / max_time * 100) if max_time > 0 else 0
-            
-            # Color gradient from fast (red) to slow (yellow)
-            color = "#D92323" if data["percentage"] > 15 else "#F59E0B" if data["percentage"] > 5 else "#D9CD23"
-            
+
+            # Use zone-specific colors
+            color = zone_colors.get(data["zone_number"], "#666")
+
             rows.append(
                 ui.div(
                     ui.layout_columns(
                         ui.div(
-                            ui.tags.strong(data["zone"] + " min/km", style="font-size: 1.1rem;"),
+                            ui.tags.strong(data["zone"], style="font-size: 1.1rem;"),
                             style="text-align: right; padding-right: 1rem;"
                         ),
                         ui.div(
@@ -2814,211 +3752,494 @@ def server(input, output, session):
                     style="padding: 0.5rem 0; border-bottom: 1px solid #e5e7eb;"
                 )
             )
-        
-        total_min = total_time / 60
-        
+
+        # Number of weeks in the data
+        num_weeks = len(weekly_df)
+
         return ui.div(
             ui.div(
                 ui.tags.p(
-                    f"Temps total analysé: {total_min:.1f} minutes ({len(df)} activités)",
+                    f"Temps total analyse: {total_time_min:.1f} minutes ({num_weeks} semaines)",
                     style="font-size: 1.1rem; color: #666; margin-bottom: 1.5rem; text-align: center;"
                 )
             ),
             ui.div(
                 *rows,
                 style="padding: 1rem;"
-            ),
-            ui.div(
-                ui.tags.p(
-                    "Cette analyse est basée sur les données de vitesse enregistrées. Les zones d'allure vous aident à comprendre votre distribution d'effort.",
-                    style="font-size: 0.9rem; color: #666; margin-top: 1rem; padding: 1rem; background: #f9fafb; border-radius: 6px; font-style: italic;"
-                )
             )
         )
-    
-    # ----------------- Year Calendar Heatmap for Activity Selection (GitHub-style) -----------------
+
+    # ----------------- Longitudinal Zone Time Graph -----------------
+    # Reactive value to store available zones for current athlete
+    zone_time_available_zones = reactive.Value([])
+
+    @reactive.Effect
+    @reactive.event(input.athlete, user_athlete_id)
+    def _update_zone_time_zones():
+        """Load available pace zones when athlete changes."""
+        role = user_role.get()
+        if role == "coach":
+            # input.athlete() returns athlete NAME, convert to athlete_id
+            athlete_name = input.athlete()
+            athlete_id = name_to_id.get(athlete_name)
+        else:
+            athlete_id = user_athlete_id.get()
+
+        if not athlete_id:
+            zone_time_available_zones.set([])
+            return
+
+        zones_df = fetch_athlete_training_zones(athlete_id)
+        print(f"[ZONE_EFFECT] zones_df rows = {len(zones_df)}", flush=True)
+        if zones_df.empty:
+            zone_time_available_zones.set([])
+            return
+
+        # Build list for UI
+        zones_list = []
+        for _, row in zones_df.iterrows():
+            pmin = row["pace_min_sec_per_km"]
+            pmax = row["pace_max_sec_per_km"]
+            zones_list.append({
+                "zone_number": int(row["zone_number"]),
+                "label": row["zone_label"],
+                "pace_min": None if pd.isna(pmin) else float(pmin),
+                "pace_max": None if pd.isna(pmax) else float(pmax)
+            })
+        zone_time_available_zones.set(zones_list)
+
+    @output
+    @render.ui
+    def zone_time_checkboxes():
+        """Dynamically render zone multi-select checkboxes."""
+        zones = zone_time_available_zones.get()
+        if not zones:
+            return ui.div(
+                ui.tags.p("Aucune zone d'allure configuree pour cet athlete.",
+                         style="color: #666; font-style: italic; padding: 0.5rem;")
+            )
+
+        # Build checkbox choices - allow 1 to all zones
+        choices = {str(z["zone_number"]): z["label"] for z in zones}
+
+        # Default: select all zones
+        default_selected = [str(z["zone_number"]) for z in zones]
+
+        return ui.input_checkbox_group(
+            "zone_time_zones",
+            "",
+            choices=choices,
+            selected=default_selected,
+            inline=True
+        )
+
+    @output
+    @render.ui
+    def monotony_zone_checkboxes():
+        """Dynamically render zone checkboxes for monotony/strain calculation."""
+        zones = zone_time_available_zones.get()
+        if not zones:
+            return ui.div(
+                ui.tags.p("Aucune zone d'allure configuree pour cet athlete.",
+                         style="color: #666; font-style: italic; padding: 0.5rem;")
+            )
+
+        # Build checkbox choices - same as zone_time_checkboxes
+        choices = {str(z["zone_number"]): z["label"] for z in zones}
+
+        # Default: select all zones
+        default_selected = [str(z["zone_number"]) for z in zones]
+
+        return ui.input_checkbox_group(
+            "monotony_zones",
+            "",
+            choices=choices,
+            selected=default_selected,
+            inline=True
+        )
+
     @render_plotly
-    def year_calendar_heatmap():
-        """Render full-year calendar heatmap (GitHub-style) showing ALL activities independent of date filters."""
-        import calendar as cal_module
-        from datetime import timedelta
-        
-        current_year = current_calendar_year.get()
-        by_date_count = calendar_all_activities.get()  # Use ALL data, not filtered
-        
-        # Start from Jan 1 of current year
-        start_date = date(current_year, 1, 1)
-        # Find the Monday before or on Jan 1
-        days_to_monday = (start_date.weekday()) % 7
-        start_monday = start_date - timedelta(days=days_to_monday)
-        
-        # End on Dec 31
-        end_date = date(current_year, 12, 31)
-        # Find the Sunday after or on Dec 31
-        days_to_sunday = (6 - end_date.weekday()) % 7
-        end_sunday = end_date + timedelta(days=days_to_sunday)
-        
-        # Build data structure: weeks (rows) x days (columns)
-        # Each week is a row with 7 days (Mon-Sun)
-        weeks_data = []
-        current_date = start_monday
-        
-        while current_date <= end_sunday:
-            week = []
-            for _ in range(7):  # Mon to Sun
-                date_str = current_date.isoformat()
-                
-                # Get activity count from ALL data (independent of date filters)
-                intensity = by_date_count.get(date_str, 0)
-                
-                # Only show if within current year
-                if current_date.year == current_year:
-                    week.append({
-                        "date": current_date,
-                        "date_str": date_str,
-                        "intensity": intensity,
-                        "in_year": True
-                    })
-                else:
-                    week.append({
-                        "date": current_date,
-                        "date_str": date_str,
-                        "intensity": 0,
-                        "in_year": False
-                    })
-                
-                current_date += timedelta(days=1)
-            
-            weeks_data.append(week)
-        
-        # Transpose: we want days of week as rows, weeks as columns (for horizontal display)
-        # Row 0 = all Mondays, Row 1 = all Tuesdays, etc.
-        day_rows = [[] for _ in range(7)]
-        for week in weeks_data:
-            for day_idx, day_data in enumerate(week):
-                day_rows[day_idx].append(day_data)
-        
-        # Build heatmap data
-        z_values = []
-        hover_text = []
-        customdata = []
-        text_annotations = []  # Day numbers to display on cells
-        
-        mois_fr = ["Jan", "Fév", "Mar", "Avr", "Mai", "Jun", 
-                   "Jul", "Aoû", "Sep", "Oct", "Nov", "Déc"]
-        
-        for day_row in day_rows:
-            z_row = []
-            hover_row = []
-            custom_row = []
-            text_row = []
-            for day_data in day_row:
-                if not day_data["in_year"]:
-                    # Outside current year - empty cell
-                    z_row.append(None)
-                    hover_row.append("")
-                    custom_row.append(None)
-                    text_row.append("")
-                elif day_data["intensity"] == 0:
-                    # No activities - show day number
-                    z_row.append(0)
-                    hover_row.append(f"{day_data['date'].day} {mois_fr[day_data['date'].month-1]}")
-                    custom_row.append(day_data["date_str"])
-                    text_row.append(str(day_data["date"].day))
-                else:
-                    # Has activities - show day number
-                    z_row.append(day_data["intensity"])
-                    hover_row.append(f"{day_data['date'].day} {mois_fr[day_data['date'].month-1]}<br>{day_data['intensity']} activité(s)")
-                    custom_row.append(day_data["date_str"])
-                    text_row.append(str(day_data["date"].day))
-            
-            z_values.append(z_row)
-            hover_text.append(hover_row)
-            customdata.append(custom_row)
-            text_annotations.append(text_row)
-        
-        # Create heatmap
-        # Calculate max intensity (filter out None values)
-        max_intensity = 3  # Default
-        all_intensities = []
-        for row in z_values:
-            all_intensities.extend([val for val in row if val is not None])
-        if all_intensities:
-            max_intensity = max(max_intensity, max(all_intensities))
-        
-        # Saint-Laurent Sélect red gradient (#D92323)
-        # Lighter = fewer activities, Darker = more activities
-        fig = go.Figure(data=go.Heatmap(
-            z=z_values,
-            text=text_annotations,  # Day numbers displayed on cells
-            texttemplate='%{text}',  # Show the day number
-            textfont=dict(
-                size=10,
-                color='rgba(60, 60, 60, 0.7)'  # Dark gray text for visibility
-            ),
-            hovertext=hover_text,  # Separate hover text with more info
-            hovertemplate='%{hovertext}<extra></extra>',
-            colorscale=[
-                [0, '#fef2f2'],      # Very light red/pink (no activity)
-                [0.25, '#fecaca'],   # Light red (1 activity)
-                [0.5, '#f87171'],    # Medium red (2 activities)
-                [0.75, '#dc2626'],   # Dark red (3+ activities)
-                [1, '#D92323']       # Darkest red (many activities) - Saint-Laurent Sélect red!
-            ],
-            showscale=False,
-            xgap=3,
-            ygap=3,
-            customdata=customdata,
-            zmin=0,
-            zmax=max_intensity
-        ))
-        
-        # Month labels at top
-        month_positions = []
-        month_labels = []
-        for month_num in range(1, 13):
-            # Find first occurrence of this month
-            first_week_idx = None
-            for week_idx, week in enumerate(weeks_data):
-                if any(d["date"].month == month_num and d["in_year"] for d in week):
-                    first_week_idx = week_idx
-                    break
-            if first_week_idx is not None:
-                month_positions.append(first_week_idx)
-                month_labels.append(mois_fr[month_num - 1])
-        
-        # Update layout - larger and more visible
+    def zone_time_longitudinal():
+        """Render longitudinal zone time chart with multi-zone support and merge/distinct modes."""
+        zones = zone_time_available_zones.get()
+        if not zones:
+            return _create_empty_plotly_fig("Configurez les zones d'allure pour cet athlete", height=360)
+
+        # Get selected zones (now multiple from checkbox group)
+        selected = input.zone_time_zones()
+        if not selected or len(selected) == 0:
+            return _create_empty_plotly_fig("Selectionnez au moins une zone", height=360)
+
+        # Convert to list of integers
+        selected_zones = sorted([int(z) for z in selected])
+
+        # Get display mode (merge or distinct)
+        display_mode = input.zone_display_mode() or "distinct"
+
+        # Get date range (use same as CTL/ATL graph)
+        try:
+            start_date = pd.to_datetime(input.date_start()).date()
+            end_date = pd.to_datetime(input.date_end()).date()
+        except Exception:
+            return _create_empty_plotly_fig("Selectionnez une periode valide", height=360)
+
+        if start_date > end_date:
+            start_date, end_date = end_date, start_date
+
+        # Get athlete ID
+        role = user_role.get()
+        if role == "coach":
+            athlete_name = input.athlete()
+            athlete_id = name_to_id.get(athlete_name)
+        else:
+            athlete_id = user_athlete_id.get()
+
+        if not athlete_id:
+            return _create_empty_plotly_fig("Aucun athlete selectionne", height=360)
+
+        # Fetch pre-calculated zone times from materialized view
+        weekly_df = fetch_weekly_zone_time_from_view(athlete_id, start_date, end_date)
+
+        if weekly_df.empty:
+            return _create_empty_plotly_fig("Aucune donnee pour cette periode", height=360)
+
+        # Fill missing weeks with 0
+        weekly_df["week_start"] = pd.to_datetime(weekly_df["week_start"])
+
+        # Create full week range (Monday to Monday)
+        first_week = start_date - timedelta(days=start_date.weekday())
+        last_week = end_date - timedelta(days=end_date.weekday())
+        full_weeks = pd.date_range(first_week, last_week, freq="W-MON")
+
+        weekly_df = weekly_df.set_index("week_start").reindex(full_weeks, fill_value=0).reset_index()
+        weekly_df = weekly_df.rename(columns={"index": "week_start"})
+
+        # Get MA window from ATL input (simpler: just one EWM line per zone)
+        atl_days = int(input.atl_days() or 7)
+        atl_weeks = max(1.0, atl_days / 7.0)  # Use float for finer granularity
+
+        fig = go.Figure()
+
+        if display_mode == "merge":
+            # MERGE MODE: Stacked bar chart showing each zone as a segment
+            zone_cols = [f"zone_{z}_minutes" for z in selected_zones if f"zone_{z}_minutes" in weekly_df.columns]
+            if not zone_cols:
+                return _create_empty_plotly_fig("Aucune donnee pour les zones selectionnees", height=360)
+
+            # Apply EWM smoothing to each zone individually
+            smoothed_data = {}
+            for zn in selected_zones:
+                col_raw = f"zone_{zn}_minutes"
+                if col_raw in weekly_df.columns:
+                    smoothed_data[zn] = weekly_df[col_raw].ewm(
+                        span=atl_weeks, min_periods=max(1, int(atl_weeks)), adjust=False
+                    ).mean()
+
+            # Filter valid data (where smoothing has enough history)
+            valid_mask = pd.Series(True, index=weekly_df.index)
+            for zn in smoothed_data:
+                valid_mask &= smoothed_data[zn].notna()
+
+            display_df = weekly_df[valid_mask].copy()
+
+            if display_df.empty:
+                return _create_empty_plotly_fig("Pas assez d'historique pour la moyenne mobile", height=360)
+
+            # Check if all values are zero
+            total_sum = sum(smoothed_data[zn][valid_mask].sum() for zn in smoothed_data)
+            if total_sum < 0.1:
+                return _create_empty_plotly_fig("Aucune donnee GPS/allure pour cet athlete", height=360)
+
+            # Convert x-axis dates to strings for Plotly
+            x_dates = [d.strftime('%Y-%m-%d') for d in display_df["week_start"]]
+
+            # Create stacked bar chart - Z1 at bottom, higher zones stacked on top
+            for zn in sorted(selected_zones):
+                if zn not in smoothed_data:
+                    continue
+
+                y_values = smoothed_data[zn][valid_mask].tolist()
+
+                # Get zone label
+                zone_info = next((z for z in zones if z["zone_number"] == zn), None)
+                label = zone_info["label"] if zone_info else f"Zone {zn}"
+
+                fig.add_trace(go.Bar(
+                    x=x_dates,
+                    y=y_values,
+                    name=label,
+                    marker_color=ZONE_COLORS.get(zn, "#888888"),
+                    hovertemplate=f"{label}<br>Sem. %{{x|%d %b}}<br>%{{y:.1f}} min<extra></extra>"
+                ))
+
+            # Group bars side-by-side within each week
+            fig.update_layout(
+                barmode='group',
+                bargap=0.15,        # Gap between weeks
+                bargroupgap=0.05    # Gap between bars within same week
+            )
+
+            # Title
+            zone_labels = ", ".join([f"Z{z}" for z in selected_zones])
+            title_text = f"Temps par zone ({zone_labels}) — MA {atl_weeks}sem"
+
+        else:
+            # DISTINCT MODE: Separate line per zone
+            has_data = False
+
+            for zn in selected_zones:
+                col_raw = f"zone_{zn}_minutes"
+                if col_raw not in weekly_df.columns:
+                    continue
+
+                # Apply EWM smoothing
+                col_ewm = f"zone_{zn}_ewm"
+                weekly_df[col_ewm] = weekly_df[col_raw].ewm(
+                    span=atl_weeks, min_periods=max(1, int(atl_weeks)), adjust=False
+                ).mean()
+
+                # Filter valid data
+                display_df = weekly_df[weekly_df[col_ewm].notna()].copy()
+
+                if display_df.empty or display_df[col_ewm].max() < 0.1:
+                    continue
+
+                has_data = True
+
+                # Get zone label
+                zone_info = next((z for z in zones if z["zone_number"] == zn), None)
+                label = zone_info["label"] if zone_info else f"Zone {zn}"
+
+                # Get color for this zone
+                zone_color = ZONE_COLORS.get(zn, "#888888")
+
+                # Convert for Plotly
+                x_dates = [d.strftime('%Y-%m-%d') for d in display_df["week_start"]]
+                y_values = display_df[col_ewm].tolist()
+
+                # Add trace for this zone
+                fig.add_trace(go.Scatter(
+                    x=x_dates,
+                    y=y_values,
+                    name=label,
+                    line=dict(color=zone_color, width=2.5),
+                    mode='lines',
+                    hovertemplate=f"{label}<br>Sem. %{{x|%d %b}}<br>%{{y:.1f}} min<extra></extra>"
+                ))
+
+            if not has_data:
+                return _create_empty_plotly_fig("Aucune donnee GPS/allure pour les zones selectionnees", height=360)
+
+            # Title for distinct mode
+            if len(selected_zones) == 1:
+                zone_info = next((z for z in zones if z["zone_number"] == selected_zones[0]), None)
+                title_text = f"Temps en {zone_info['label'] if zone_info else f'Zone {selected_zones[0]}'} — MA {atl_weeks}sem"
+            else:
+                title_text = f"Temps par zone — MA {atl_weeks}sem"
+
+        # ACL/ATL overlay lines (works in both modes)
+        if input.show_acl_atl():
+            # Calculate total minutes across all selected zones
+            zone_cols = [f"zone_{z}_minutes" for z in selected_zones if f"zone_{z}_minutes" in weekly_df.columns]
+            if zone_cols:
+                weekly_df["total_selected_minutes"] = weekly_df[zone_cols].sum(axis=1)
+
+                # Get CTL days for chronic load
+                ctl_days = int(input.ctl_days() or 28)
+                ctl_weeks = max(1.0, ctl_days / 7.0)  # Use float for finer granularity
+
+                # ACL (Acute) - short-term using atl_weeks
+                acl_values = weekly_df["total_selected_minutes"].ewm(
+                    span=atl_weeks, min_periods=max(1, int(atl_weeks)), adjust=False
+                ).mean()
+
+                # ATL (Chronic) - long-term using ctl_weeks
+                atl_values = weekly_df["total_selected_minutes"].ewm(
+                    span=ctl_weeks, min_periods=max(1, int(ctl_weeks)), adjust=False
+                ).mean()
+
+                # Filter to valid data (where both have enough history)
+                valid_mask = acl_values.notna() & atl_values.notna()
+                if valid_mask.any():
+                    acl_display = weekly_df[valid_mask].copy()
+                    x_acl_dates = [d.strftime('%Y-%m-%d') for d in acl_display["week_start"]]
+
+                    # Add ACL line (dashed, red)
+                    fig.add_trace(go.Scatter(
+                        x=x_acl_dates,
+                        y=acl_values[valid_mask].tolist(),
+                        name=f"ACL ({atl_days}j)",
+                        line=dict(color="#E63946", width=2, dash="dash"),
+                        mode='lines',
+                        hovertemplate="ACL<br>Sem. %{x|%d %b}<br>%{y:.1f} min<extra></extra>"
+                    ))
+
+                    # Add ATL line (solid, navy)
+                    fig.add_trace(go.Scatter(
+                        x=x_acl_dates,
+                        y=atl_values[valid_mask].tolist(),
+                        name=f"ATL ({ctl_days}j)",
+                        line=dict(color="#1D3557", width=2.5),
+                        mode='lines',
+                        hovertemplate="ATL<br>Sem. %{x|%d %b}<br>%{y:.1f} min<extra></extra>"
+                    ))
+
+        # Set X-axis range
+        if 'x_dates' in locals() and x_dates:
+            x_range = [x_dates[0], x_dates[-1]]
+        else:
+            x_range = [first_week.strftime('%Y-%m-%d'), last_week.strftime('%Y-%m-%d')]
+
         fig.update_layout(
+            autosize=True,
+            title=dict(
+                text=title_text,
+                font=dict(size=16, color='#262626')
+            ),
             xaxis=dict(
-                tickmode='array',  # Force use of custom ticktext/tickvals
-                ticktext=month_labels,
-                tickvals=month_positions,
-                tickangle=0,
-                side='top',
-                showgrid=False,
-                tickfont=dict(size=13, color='#262626')
+                title="Date",
+                type='date',
+                tickformat='%d %b',
+                showgrid=True,
+                gridcolor='rgba(128, 128, 128, 0.2)',
+                dtick="M1",
+                range=x_range
             ),
             yaxis=dict(
-                ticktext=['L', 'M', 'M', 'J', 'V', 'S', 'D'],  # Mon to Sun (top to bottom)
-                tickvals=[0, 1, 2, 3, 4, 5, 6],
-                showgrid=False,
-                fixedrange=True,
-                tickfont=dict(size=12, color='#262626'),
-                autorange='reversed'  # Reverse to show index 0 (Monday) at top
+                title="Minutes par semaine",
+                showgrid=True,
+                gridcolor='rgba(128, 128, 128, 0.2)',
+                rangemode='tozero'
             ),
-            height=220,  # Larger height for better visibility
-            margin=dict(l=35, r=20, t=40, b=20),
             plot_bgcolor='white',
-            paper_bgcolor='white',
-            dragmode=False,  # No interaction needed
-            hovermode='closest'
+            height=400,
+            hovermode='x unified',
+            legend=dict(
+                x=0, y=1,
+                bgcolor='rgba(255,255,255,0.9)',
+                font=dict(size=11),
+                orientation='h'
+            ),
+            margin=dict(l=70, r=30, t=70, b=70)
         )
-        
-        # Configure hover and text display
-        fig.update_traces(
-            hoverlabel=dict(bgcolor="white", font_size=11),
+
+        return fig
+
+    @render_plotly
+    def monotony_strain_graph():
+        """Render Training Monotony and Strain graph (Carl Foster model)."""
+        zones = zone_time_available_zones.get()
+        if not zones:
+            return _create_empty_plotly_fig("Configurez les zones d'allure pour cet athlete", height=350)
+
+        # Get selected zones from monotony checkboxes
+        selected = input.monotony_zones()
+        if not selected or len(selected) == 0:
+            return _create_empty_plotly_fig("Selectionnez au moins une zone", height=350)
+
+        # Convert to list of integers
+        selected_zones = sorted([int(z) for z in selected])
+
+        # Get metric to display
+        metric = input.monotony_metric() or "strain"
+
+        # Get date range
+        try:
+            start_date = pd.to_datetime(input.date_start()).date()
+            end_date = pd.to_datetime(input.date_end()).date()
+        except Exception:
+            return _create_empty_plotly_fig("Selectionnez une periode valide", height=350)
+
+        if start_date > end_date:
+            start_date, end_date = end_date, start_date
+
+        # Get athlete ID
+        role = user_role.get()
+        if role == "coach":
+            athlete_name = input.athlete()
+            athlete_id = name_to_id.get(athlete_name)
+        else:
+            athlete_id = user_athlete_id.get()
+
+        if not athlete_id:
+            return _create_empty_plotly_fig("Aucun athlete selectionne", height=350)
+
+        # Try pre-calculated data first (Phase 2V optimization)
+        result_df = fetch_weekly_monotony_strain_from_db(athlete_id, start_date, end_date, selected_zones)
+
+        # Fallback to on-the-fly calculation if no pre-calculated data
+        if result_df.empty:
+            daily_df = fetch_daily_zone_time(athlete_id, start_date, end_date)
+            if daily_df.empty:
+                return _create_empty_plotly_fig("Aucune donnee pour cette periode", height=350)
+            result_df = calculate_weekly_monotony_strain(daily_df, selected_zones, start_date, end_date)
+
+        if result_df.empty:
+            return _create_empty_plotly_fig("Pas assez de donnees pour le calcul", height=350)
+
+        # Prepare data for Plotly
+        x_dates = [d.strftime('%Y-%m-%d') if hasattr(d, 'strftime') else str(d) for d in result_df["week_start"]]
+
+        if metric == "monotony":
+            y_values = result_df["monotony"].tolist()
+            y_title = "Monotonie"
+            title_text = "Monotonie hebdomadaire (1/CV)"
+            line_color = "#8B5CF6"  # Purple
+            hover_template = "Sem. %{x|%d %b}<br>Monotonie: %{y:.2f}<extra></extra>"
+        else:
+            y_values = result_df["strain"].tolist()
+            y_title = "Strain (charge × monotonie)"
+            title_text = "Strain hebdomadaire (Charge × Monotonie)"
+            line_color = "#EF4444"  # Red
+            hover_template = "Sem. %{x|%d %b}<br>Strain: %{y:.0f}<extra></extra>"
+
+        fig = go.Figure()
+
+        fig.add_trace(go.Scatter(
+            x=x_dates,
+            y=y_values,
+            mode='lines+markers',
+            line=dict(color=line_color, width=2.5),
+            marker=dict(size=6, color=line_color),
+            name=y_title,
+            hovertemplate=hover_template
+        ))
+
+        # Zone labels for title
+        zone_labels = ", ".join([f"Z{z}" for z in selected_zones])
+
+        fig.update_layout(
+            autosize=True,
+            title=dict(
+                text=f"{title_text} ({zone_labels})",
+                font=dict(size=16, color='#262626')
+            ),
+            xaxis=dict(
+                title="Date",
+                type='date',
+                tickformat='%d %b',
+                showgrid=True,
+                gridcolor='rgba(128, 128, 128, 0.2)',
+                dtick="M1"
+            ),
+            yaxis=dict(
+                title=y_title,
+                showgrid=True,
+                gridcolor='rgba(128, 128, 128, 0.2)',
+                rangemode='tozero'
+            ),
+            plot_bgcolor='white',
+            height=350,
+            hovermode='x unified',
+            legend=dict(
+                x=0, y=1,
+                bgcolor='rgba(255,255,255,0.9)',
+                font=dict(size=11),
+                orientation='h'
+            ),
+            margin=dict(l=70, r=30, t=70, b=70)
         )
-        
+
         return fig
 
     # ----------------- Analyse de séance (X/Y dynamiques) -----------------
@@ -3076,9 +4297,9 @@ def server(input, output, session):
         if "ground_contact_time" in df.columns and df["ground_contact_time"].notna().any():
             choices["Temps de contact au sol (GCT)"] = "Temps de contact au sol (GCT)"
 
-        # 8. Rigidité du ressort de jambe (LSS)
+        # 8. Leg Spring Stiffness (LSS)
         if "leg_spring_stiffness" in df.columns and df["leg_spring_stiffness"].notna().any():
-            choices["Rigidité du ressort de jambe (LSS)"] = "Rigidité du ressort de jambe (LSS)"
+            choices["Leg Spring Stiffness (LSS)"] = "Leg Spring Stiffness (LSS)"
 
         # Update both primary and secondary Y-axis selects with SAME choices
         current_selection_y1 = input.yvar()
@@ -3144,7 +4365,7 @@ def server(input, output, session):
     @render_plotly
     def plot_xy():
         d = xy_data()
-        
+
         if not d:
             # Return empty figure with message
             fig = go.Figure()
@@ -3167,20 +4388,20 @@ def server(input, output, session):
             raw_y2 = (input.yvar2() or "none")
         except:
             raw_y2 = "none"
-        
+
         yvar2 = YVAR_ALIASES.get(raw_y2, "none")
         raw_y1 = input.yvar() or "heartrate"
         yvar1 = YVAR_ALIASES.get(raw_y1, "heartrate")
         has_secondary = yvar2 != "none" and yvar2 != yvar1
-        
+
         # Get info for activity metadata
         info = (id_to_info.get() or {}).get(d["act_id"], {})
-        
+
         # Initialize secondary Y variables
         y2 = None
         y2_label = ""
         y2_fmt = None
-        
+
         if has_secondary:
             # Prepare secondary Y data
             try:
@@ -3195,10 +4416,36 @@ def server(input, output, session):
                 import traceback
                 traceback.print_exc()
                 has_secondary = False
-        
-        # Format x-axis values if needed (for time)
-        x_values = d["x"]
+
+        # Get FULL x values for reference (before filtering)
+        x_values_full = d["x"]
         x_is_time = d["x_fmt"] is not None
+
+        # Apply range filter from sliders
+        # Store unfiltered y2 for fallback
+        y2_full = y2.copy() if (has_secondary and y2 is not None) else None
+
+        try:
+            range_start = input.range_start()
+            range_end = input.range_end()
+            # Create mask to filter data to selected range
+            mask = (x_values_full >= range_start) & (x_values_full <= range_end)
+            x_values = x_values_full[mask]
+            y_values = d["y"][mask]
+            if has_secondary and y2 is not None:
+                y2 = y2[mask]
+            # If filtering resulted in empty data, fall back to full data
+            if len(x_values) == 0:
+                x_values = x_values_full
+                y_values = d["y"]
+                if has_secondary and y2_full is not None:
+                    y2 = y2_full
+        except:
+            # Sliders not initialized yet, use full data
+            x_values = x_values_full
+            y_values = d["y"]
+            if has_secondary and y2_full is not None:
+                y2 = y2_full
         
         # Helper function to format seconds to hh:mm:ss or mm:ss
         def format_time(seconds):
@@ -3217,9 +4464,9 @@ def server(input, output, session):
             x_hover = [format_time(val) for val in x_values]
         else:
             x_hover = x_values
-        
+
         # Format y-axis values if needed (for pace)
-        y_values = d["y"]
+        # Note: y_values is already filtered above via range sliders
         y_is_time = d["y_fmt"] is not None
         
         if y_is_time:
@@ -3312,9 +4559,10 @@ def server(input, output, session):
             else:
                 tick_interval = 600  # 10 minutes
             
-            # Generate tick values
-            tick_vals = np.arange(0, x_max + tick_interval, tick_interval)
-            tick_vals = tick_vals[tick_vals <= x_max]
+            # Generate tick values starting from x_min (rounded down to nearest tick)
+            tick_start = (int(x_min) // tick_interval) * tick_interval
+            tick_vals = np.arange(tick_start, x_max + tick_interval, tick_interval)
+            tick_vals = tick_vals[(tick_vals >= x_min) & (tick_vals <= x_max)]
             
             # Format tick labels
             tick_text = [format_time(val) for val in tick_vals]
@@ -3371,11 +4619,45 @@ def server(input, output, session):
             
             # Secondary Y-axis configuration
             secondary_y_config = dict(title_text=y2_label, showgrid=False)
-            if y2 is not None and y2_fmt is not None:  # Reverse if pace on secondary
-                secondary_y_config['autorange'] = 'reversed'
+
+            # Add pace formatting for secondary Y-axis if it's pace (min/km)
+            if yvar2 == "pace" and y2 is not None and len(y2) > 0:
+                # Get min/max of y2 values (excluding NaN)
+                y2_clean = y2[np.isfinite(y2)]
+                if len(y2_clean) > 0:
+                    y2_min = np.nanmin(y2_clean)
+                    y2_max = np.nanmax(y2_clean)
+
+                    # Generate pace tick values (e.g., 3:00, 3:30, 4:00, etc.)
+                    y2_min_minutes = int(y2_min // 60)
+                    y2_max_minutes = int(y2_max // 60) + 1
+
+                    pace_ticks = []
+                    for minute in range(y2_min_minutes, y2_max_minutes + 1):
+                        pace_ticks.append(minute * 60)  # On the minute
+                        if minute < y2_max_minutes:
+                            pace_ticks.append(minute * 60 + 30)  # Half minute
+
+                    pace_ticks = [t for t in pace_ticks if y2_min <= t <= y2_max]
+
+                    # Format pace labels as MM:SS
+                    def format_pace_label(seconds):
+                        minutes = int(seconds // 60)
+                        secs = int(seconds % 60)
+                        return f"{minutes}:{secs:02d}"
+
+                    pace_labels = [format_pace_label(t) for t in pace_ticks]
+
+                    secondary_y_config['tickmode'] = 'array'
+                    secondary_y_config['tickvals'] = pace_ticks
+                    secondary_y_config['ticktext'] = pace_labels
+                    # NO reversal - slower pace (high value like 9:00) at top, faster (low value like 3:00) at bottom
+                    # This matches intuition: when pace line goes DOWN, runner is going FASTER
+
             fig.update_yaxes(**secondary_y_config, secondary_y=True)
             
             fig.update_layout(
+                autosize=True,  # Responsive sizing for production
                 plot_bgcolor='white',
                 height=600,
                 hovermode='x unified',
@@ -3386,6 +4668,7 @@ def server(input, output, session):
         else:
             # Single Y-axis layout
             fig.update_layout(
+                autosize=True,  # Responsive sizing for production
                 xaxis=xaxis_config,
                 yaxis=yaxis_config,
                 plot_bgcolor='white',
@@ -3562,7 +4845,7 @@ def server(input, output, session):
         if x_min >= x_max:
             return ui.div(
                 ui.card(
-                    ui.card_header("⚠️ Plage invalide"),
+                    ui.card_header("Plage invalide"),
                     ui.div("La valeur de début doit être inférieure à la valeur de fin.", style="padding: 1rem; color: #dc2626;")
                 )
             )
@@ -3598,7 +4881,7 @@ def server(input, output, session):
         if len(df_range) == 0:
             return ui.div(
                 ui.card(
-                    ui.card_header("⚠️ Aucune donnée"),
+                    ui.card_header("Aucune donnée"),
                     ui.div("Aucune donnée dans la plage sélectionnée.", style="padding: 1rem; color: #dc2626;")
                 )
             )
@@ -3637,12 +4920,12 @@ def server(input, output, session):
 
         # Define metrics to display (similar to comparison stats)
         metrics = [
-            {'name': 'Fréquence cardiaque', 'col': 'heartrate', 'unit': 'bpm', 'format': lambda x: f"{x:.0f}", 'icon': '❤️'},
-            {'name': 'Cadence', 'col': 'cadence', 'unit': 'spm', 'format': lambda x: f"{x:.0f}", 'icon': '👟'},
+            {'name': 'Fréquence cardiaque', 'col': 'heartrate', 'unit': 'bpm', 'format': lambda x: f"{x:.0f}"},
+            {'name': 'Cadence', 'col': 'cadence', 'unit': 'spm', 'format': lambda x: f"{x:.0f}"},
             {'name': 'Puissance', 'col': 'watts', 'unit': 'W', 'format': lambda x: f"{x:.0f}"},
-            {'name': 'Oscillation verticale', 'col': 'vertical_oscillation', 'unit': 'mm', 'format': lambda x: f"{x:.1f}", 'icon': '📏'},
-            {'name': 'Temps de contact (GCT)', 'col': 'ground_contact_time', 'unit': 'ms', 'format': lambda x: f"{x:.0f}", 'icon': '⏱️'},
-            {'name': 'Rigidité ressort jambe (LSS)', 'col': 'leg_spring_stiffness', 'unit': 'kN/m', 'format': lambda x: f"{x:.1f}", 'icon': '🦵'},
+            {'name': 'Oscillation verticale', 'col': 'vertical_oscillation', 'unit': 'mm', 'format': lambda x: f"{x:.1f}"},
+            {'name': 'Temps de contact (GCT)', 'col': 'ground_contact_time', 'unit': 'ms', 'format': lambda x: f"{x:.0f}"},
+            {'name': 'Leg Spring Stiffness (LSS)', 'col': 'leg_spring_stiffness', 'unit': 'kN/m', 'format': lambda x: f"{x:.1f}"},
         ]
 
         # Build metric rows
@@ -3711,7 +4994,7 @@ def server(input, output, session):
         if not metric_rows:
             return ui.div(
                 ui.card(
-                    ui.card_header("⚠️ Aucune métrique disponible"),
+                    ui.card_header("Aucune métrique disponible"),
                     ui.div("Aucune métrique de performance disponible pour cette plage.", style="padding: 1rem; color: #dc2626;")
                 )
             )
@@ -3824,6 +5107,23 @@ def server(input, output, session):
             if act_id:
                 comparison_activity_id_2.set(act_id)
     
+    # Initialize crop ranges when activities change (separate from render to avoid state warnings)
+    @reactive.Effect
+    @reactive.event(comparison_activity_id_1)
+    def init_crop_range_1():
+        """Initialize crop range for Activity 1 when activity changes"""
+        act_id_1 = comparison_activity_id_1.get()
+        if not act_id_1:
+            return
+        try:
+            df1 = fetch_timeseries_cached(act_id_1)
+            if df1.empty or 't_active_sec' not in df1.columns:
+                return
+            max_time_1 = df1['t_active_sec'].max()
+            crop_range_1.set([0, max_time_1])
+        except:
+            pass
+
     # Crop controls
     @output
     @render.ui
@@ -3835,19 +5135,21 @@ def server(input, output, session):
             df1 = fetch_timeseries_cached(act_id_1)
             if df1.empty:
                 return ui.div()
-            
+
             # Use t_active_sec column for duration (moving time)
             if 't_active_sec' not in df1.columns:
                 return ui.div("Données de temps en mouvement non disponibles", style="color: #999; padding: 1rem;")
-            
+
             # Get max moving time for this activity only
             max_time_1 = df1['t_active_sec'].max()
-            
-            # Initialize crop range if not set
-            current_crop = crop_range_1.get()
+
+            # Get current crop range (initialized by init_crop_range_1 effect)
+            # Use reactive.isolate() to prevent this UI from re-rendering when crop_range_1 changes
+            # This prevents infinite loops when slider is moved quickly
+            with reactive.isolate():
+                current_crop = crop_range_1.get()
             if current_crop == [0, 0] or current_crop[1] == 0:
-                crop_range_1.set([0, max_time_1])
-                current_crop = [0, max_time_1]
+                current_crop = [0, max_time_1]  # Use local default, don't set reactive value here
             
             # JavaScript to format slider values as time (optimized to prevent flashing)
             slider_js = f"""
@@ -3933,6 +5235,22 @@ def server(input, output, session):
         except Exception as e:
             return ui.div(f"Erreur: {str(e)}", style="color: #dc2626; padding: 1rem;")
     
+    @reactive.Effect
+    @reactive.event(comparison_activity_id_2)
+    def init_crop_range_2():
+        """Initialize crop range for Activity 2 when activity changes"""
+        act_id_2 = comparison_activity_id_2.get()
+        if not act_id_2:
+            return
+        try:
+            df2 = fetch_timeseries_cached(act_id_2)
+            if df2.empty or 't_active_sec' not in df2.columns:
+                return
+            max_time_2 = df2['t_active_sec'].max()
+            crop_range_2.set([0, max_time_2])
+        except:
+            pass
+
     @output
     @render.ui
     def crop_controls_2():
@@ -3943,19 +5261,21 @@ def server(input, output, session):
             df2 = fetch_timeseries_cached(act_id_2)
             if df2.empty:
                 return ui.div()
-            
+
             # Use t_active_sec column for duration (moving time)
             if 't_active_sec' not in df2.columns:
                 return ui.div("Données de temps en mouvement non disponibles", style="color: #999; padding: 1rem;")
-            
+
             # Get max moving time for this activity only
             max_time_2 = df2['t_active_sec'].max()
-            
-            # Initialize crop range if not set
-            current_crop = crop_range_2.get()
+
+            # Get current crop range (initialized by init_crop_range_2 effect)
+            # Use reactive.isolate() to prevent this UI from re-rendering when crop_range_2 changes
+            # This prevents infinite loops when slider is moved quickly
+            with reactive.isolate():
+                current_crop = crop_range_2.get()
             if current_crop == [0, 0] or current_crop[1] == 0:
-                crop_range_2.set([0, max_time_2])
-                current_crop = [0, max_time_2]
+                current_crop = [0, max_time_2]  # Use local default, don't set reactive value here
             
             # JavaScript to format slider values as time (optimized to prevent flashing)
             slider_js = f"""
@@ -4041,21 +5361,91 @@ def server(input, output, session):
         except Exception as e:
             return ui.div(f"Erreur: {str(e)}", style="color: #dc2626; padding: 1rem;")
     
-    # Sync sliders - simple version without bidirectional update to prevent loops
+    # Sync sliders - with debouncing to prevent infinite loops on fast movement
+    # Track last update times for debouncing
+    import time as _time_module
+    _last_slider_update_1 = reactive.Value(0.0)
+    _last_slider_update_2 = reactive.Value(0.0)
+    _SLIDER_DEBOUNCE_MS = 50  # Minimum milliseconds between updates
+
     @reactive.Effect
     @reactive.event(input.crop_slider_1)
     def update_crop_1():
         val = input.crop_slider_1()
         if val:
-            crop_range_1.set(val)
-    
+            current_time = _time_module.time() * 1000  # ms
+            last_update = _last_slider_update_1.get()
+            # Only update if enough time has passed (debouncing)
+            if current_time - last_update > _SLIDER_DEBOUNCE_MS:
+                # Check if value actually changed (prevent loops)
+                current = crop_range_1.get()
+                if current != list(val):
+                    _last_slider_update_1.set(current_time)
+                    crop_range_1.set(list(val))
+
     @reactive.Effect
     @reactive.event(input.crop_slider_2)
     def update_crop_2():
         val = input.crop_slider_2()
         if val:
-            crop_range_2.set(val)
+            current_time = _time_module.time() * 1000  # ms
+            last_update = _last_slider_update_2.get()
+            # Only update if enough time has passed (debouncing)
+            if current_time - last_update > _SLIDER_DEBOUNCE_MS:
+                # Check if value actually changed (prevent loops)
+                current = crop_range_2.get()
+                if current != list(val):
+                    _last_slider_update_2.set(current_time)
+                    crop_range_2.set(list(val))
     
+    # Sync manual input fields when slider changes (without re-rendering entire UI)
+    # Only sync when inputs exist (i.e., comparison tab is active and activity selected)
+    @reactive.Effect
+    @reactive.event(crop_range_1)
+    def sync_manual_inputs_1():
+        """Update manual time inputs when crop_range_1 changes from slider"""
+        # Only run if comparison is enabled and activity 1 is selected
+        # This ensures the manual inputs exist in the DOM
+        if not input.comparison_enabled():
+            return
+        if not comparison_activity_id_1.get():
+            return
+        crop = crop_range_1.get()
+        if crop and len(crop) == 2 and crop != [0, 0]:
+            start_sec = crop[0]
+            end_sec = crop[1]
+            # Update start time inputs
+            ui.update_numeric("manual_start_h_1", value=int(start_sec // 3600))
+            ui.update_numeric("manual_start_m_1", value=int((start_sec % 3600) // 60))
+            ui.update_numeric("manual_start_s_1", value=int(start_sec % 60))
+            # Update end time inputs
+            ui.update_numeric("manual_end_h_1", value=int(end_sec // 3600))
+            ui.update_numeric("manual_end_m_1", value=int((end_sec % 3600) // 60))
+            ui.update_numeric("manual_end_s_1", value=int(end_sec % 60))
+
+    @reactive.Effect
+    @reactive.event(crop_range_2)
+    def sync_manual_inputs_2():
+        """Update manual time inputs when crop_range_2 changes from slider"""
+        # Only run if comparison is enabled and activity 2 is selected
+        # This ensures the manual inputs exist in the DOM
+        if not input.comparison_enabled():
+            return
+        if not comparison_activity_id_2.get():
+            return
+        crop = crop_range_2.get()
+        if crop and len(crop) == 2 and crop != [0, 0]:
+            start_sec = crop[0]
+            end_sec = crop[1]
+            # Update start time inputs
+            ui.update_numeric("manual_start_h_2", value=int(start_sec // 3600))
+            ui.update_numeric("manual_start_m_2", value=int((start_sec % 3600) // 60))
+            ui.update_numeric("manual_start_s_2", value=int(start_sec % 60))
+            # Update end time inputs
+            ui.update_numeric("manual_end_h_2", value=int(end_sec // 3600))
+            ui.update_numeric("manual_end_m_2", value=int((end_sec % 3600) // 60))
+            ui.update_numeric("manual_end_s_2", value=int(end_sec % 60))
+
     # Preset handlers - "Complet" button to reset to full workout
     @reactive.Effect
     @reactive.event(input.preset_full_1)
@@ -4319,14 +5709,14 @@ def server(input, output, session):
             fig.add_annotation(text="Activez la comparaison", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=18, color="#666"))
             fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False), height=600, plot_bgcolor="white")
             return fig
-        
+
         act_id_1 = comparison_activity_id_1.get()
         if not act_id_1:
             fig = go.Figure()
             fig.add_annotation(text="Sélectionnez l'Activité 1", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=18, color="#D92323"))
             fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False), height=600, plot_bgcolor="white")
             return fig
-        
+
         try:
             df1 = fetch_timeseries_cached(act_id_1)
             if df1.empty:
@@ -4334,7 +5724,7 @@ def server(input, output, session):
                 fig.add_annotation(text="Activité 1 sans données", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=18, color="#D92323"))
                 fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False), height=600, plot_bgcolor="white")
                 return fig
-            
+
             # Get crop range - don't modify reactive values here to avoid circular reactivity
             if 't_active_sec' not in df1.columns:
                 fig = go.Figure()
@@ -4343,22 +5733,70 @@ def server(input, output, session):
                 return fig
             
             crop1 = crop_range_1.get()
-            # Use full range if crop not initialized
-            if crop1 == [0, 0] or crop1[1] == 0:
-                crop1 = [0, df1['t_active_sec'].max()]
-            
+            max_time_1 = df1['t_active_sec'].max()
+            print(f"[DEBUG comparison_plot] crop1: {crop1}, max_time_1: {max_time_1}")
+
+            # Use full range if crop not initialized or invalid
+            if crop1 == [0, 0] or crop1[1] == 0 or crop1[1] > max_time_1:
+                crop1 = [0, max_time_1]
+                print(f"[DEBUG comparison_plot] Using full range: {crop1}")
+
+            # Ensure we have valid crop range
+            if max_time_1 <= 0 or np.isnan(max_time_1):
+                fig = go.Figure()
+                fig.add_annotation(text="Donnees de temps invalides pour l'Activite 1", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=18, color="#D92323"))
+                fig.update_layout(autosize=True, xaxis=dict(visible=False), yaxis=dict(visible=False), height=600, plot_bgcolor="white")
+                return fig
+
             df1_cropped = crop_timeseries(df1, "time", crop1[0], crop1[1])
-            
+            print(f"[DEBUG comparison_plot] df1_cropped rows: {len(df1_cropped)}")
+
+            # Check if cropped data is empty
+            if df1_cropped.empty:
+                fig = go.Figure()
+                fig.add_annotation(text="Aucune donnee dans la plage selectionnee", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=18, color="#D92323"))
+                fig.update_layout(autosize=True, xaxis=dict(visible=False), yaxis=dict(visible=False), height=600, plot_bgcolor="white")
+                return fig
+
             xvar = XVAR_ALIASES.get(input.comp_xvar() or "moving", "moving")
             yvar = YVAR_ALIASES.get(input.comp_yvar() or "Fréquence cardiaque", "heartrate")
             yvar2_input = input.comp_yvar2() or "none"
             yvar2 = YVAR_ALIASES.get(yvar2_input, None) if yvar2_input != "none" else None
-            
+
             info1 = id_to_info.get().get(act_id_1, {})
             activity_type1 = (info1.get("type") or "run").lower()
-            
+
             x1, y1, x1_label, y1_label, _, _ = _prep_xy(df1_cropped, xvar, yvar, activity_type1, smooth_win=21)
-            
+
+            # Debug: Print data info
+            print(f"[DEBUG comparison_plot] x1 type: {type(x1)}, len: {len(x1) if hasattr(x1, '__len__') else 'N/A'}")
+            print(f"[DEBUG comparison_plot] y1 type: {type(y1)}, len: {len(y1) if hasattr(y1, '__len__') else 'N/A'}")
+            if len(x1) > 0:
+                print(f"[DEBUG comparison_plot] x1 sample: {x1[:5]}, y1 sample: {y1[:5]}")
+
+            # Calculate max_x BEFORE converting to lists (numpy arrays have .max(), lists don't)
+            max_x = x1.max() if len(x1) > 0 else 0
+
+            # Convert numpy arrays to lists for Plotly compatibility
+            x1 = x1.tolist() if hasattr(x1, 'tolist') else list(x1)
+            y1 = y1.tolist() if hasattr(y1, 'tolist') else list(y1)
+
+            # Remove NaN values which can cause rendering issues
+            valid_mask = [not (np.isnan(xi) if isinstance(xi, (float, np.floating)) else False or
+                              np.isnan(yi) if isinstance(yi, (float, np.floating)) else False)
+                          for xi, yi in zip(x1, y1)]
+            x1 = [x for x, v in zip(x1, valid_mask) if v]
+            y1 = [y for y, v in zip(y1, valid_mask) if v]
+
+            print(f"[DEBUG comparison_plot] After cleaning - x1 len: {len(x1)}, y1 len: {len(y1)}")
+
+            # Check if we have data after cleaning
+            if len(x1) == 0 or len(y1) == 0:
+                fig = go.Figure()
+                fig.add_annotation(text="Aucune donnee valide pour l'Activite 1", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=18, color="#D92323"))
+                fig.update_layout(autosize=True, xaxis=dict(visible=False), yaxis=dict(visible=False), height=600, plot_bgcolor="white")
+                return fig
+
             # Helper function to format seconds to mm:ss or hh:mm:ss
             def format_seconds_to_time(seconds):
                 """Convert seconds to hh:mm:ss format"""
@@ -4372,10 +5810,7 @@ def server(input, output, session):
             
             # Create formatted time labels for hover
             x1_formatted = [format_seconds_to_time(t) for t in x1]
-            
-            # Keep x1 in seconds (actual time)
-            max_x = x1.max() if len(x1) > 0 else 0
-            
+
             fig = go.Figure()
             # Primary Y-axis trace for Activity 1 (solid red)
             fig.add_trace(go.Scatter(
@@ -4390,15 +5825,24 @@ def server(input, output, session):
             # Secondary Y-axis trace for Activity 1 (dashed red) if selected
             if yvar2:
                 x1_y2, y1_y2, _, y1_y2_label, _, _ = _prep_xy(df1_cropped, xvar, yvar2, activity_type1, smooth_win=21)
+                # Convert to lists and clean NaN
+                x1_y2 = x1_y2.tolist() if hasattr(x1_y2, 'tolist') else list(x1_y2)
+                y1_y2 = y1_y2.tolist() if hasattr(y1_y2, 'tolist') else list(y1_y2)
+                valid_mask = [not (np.isnan(xi) if isinstance(xi, (float, np.floating)) else False or
+                                  np.isnan(yi) if isinstance(yi, (float, np.floating)) else False)
+                              for xi, yi in zip(x1_y2, y1_y2)]
+                x1_y2 = [x for x, v in zip(x1_y2, valid_mask) if v]
+                y1_y2 = [y for y, v in zip(y1_y2, valid_mask) if v]
                 x1_y2_formatted = [format_seconds_to_time(t) for t in x1_y2]
-                fig.add_trace(go.Scatter(
-                    x=x1_y2, y=y1_y2, mode='lines',
-                    line=dict(color='#D92323', width=2.5, dash='dash'),
-                    name=f"Activité 1 - {y1_y2_label}",
-                    yaxis='y2',
-                    customdata=x1_y2_formatted,
-                    hovertemplate='<b>Activité 1</b><br>Temps: %{customdata}<br>' + y1_y2_label + ': %{y}<extra></extra>'
-                ))
+                if len(x1_y2) > 0:  # Only add trace if there's data
+                    fig.add_trace(go.Scatter(
+                        x=x1_y2, y=y1_y2, mode='lines',
+                        line=dict(color='#D92323', width=2.5, dash='dash'),
+                        name=f"Activité 1 - {y1_y2_label}",
+                        yaxis='y2',
+                        customdata=x1_y2_formatted,
+                        hovertemplate='<b>Activité 1</b><br>Temps: %{customdata}<br>' + y1_y2_label + ': %{y}<extra></extra>'
+                    ))
             
             act_id_2 = comparison_activity_id_2.get()
             if act_id_2:
@@ -4414,35 +5858,56 @@ def server(input, output, session):
                     info2 = id_to_info.get().get(act_id_2, {})
                     activity_type2 = (info2.get("type") or "run").lower()
                     x2, y2, _, _, _, _ = _prep_xy(df2_cropped, xvar, yvar, activity_type2, smooth_win=21)
-                    
+
+                    # Use the longest workout for X-axis max (before converting to list)
+                    max_x = max(max_x, x2.max() if len(x2) > 0 else 0)
+
+                    # Convert to lists and clean NaN
+                    x2 = x2.tolist() if hasattr(x2, 'tolist') else list(x2)
+                    y2 = y2.tolist() if hasattr(y2, 'tolist') else list(y2)
+                    valid_mask = [not (np.isnan(xi) if isinstance(xi, (float, np.floating)) else False or
+                                      np.isnan(yi) if isinstance(yi, (float, np.floating)) else False)
+                                  for xi, yi in zip(x2, y2)]
+                    x2 = [x for x, v in zip(x2, valid_mask) if v]
+                    y2 = [y for y, v in zip(y2, valid_mask) if v]
+
+                    print(f"[DEBUG comparison_plot] Activity 2 - x2 len: {len(x2)}, y2 len: {len(y2)}")
+
                     # Create formatted time labels for Activity 2
                     x2_formatted = [format_seconds_to_time(t) for t in x2]
-                    
-                    # Use the longest workout for X-axis max
-                    max_x = max(max_x, x2.max() if len(x2) > 0 else 0)
-                    
+
                     # Primary Y-axis trace for Activity 2 (solid yellow/orange)
-                    fig.add_trace(go.Scatter(
-                        x=x2, y=y2, mode='lines',
-                        line=dict(color='#F59E0B', width=2.5),  # Amber/orange color
-                        name=f"Activité 2 - {y1_label}",
-                        yaxis='y',
-                        customdata=x2_formatted,
-                        hovertemplate='<b>Activité 2</b><br>Temps: %{customdata}<br>' + y1_label + ': %{y}<extra></extra>'
-                    ))
-                    
+                    if len(x2) > 0:  # Only add trace if there's data
+                        fig.add_trace(go.Scatter(
+                            x=x2, y=y2, mode='lines',
+                            line=dict(color='#F59E0B', width=2.5),  # Amber/orange color
+                            name=f"Activité 2 - {y1_label}",
+                            yaxis='y',
+                            customdata=x2_formatted,
+                            hovertemplate='<b>Activité 2</b><br>Temps: %{customdata}<br>' + y1_label + ': %{y}<extra></extra>'
+                        ))
+
                     # Secondary Y-axis trace for Activity 2 (dashed yellow/orange) if selected
                     if yvar2:
                         x2_y2, y2_y2, _, y2_y2_label, _, _ = _prep_xy(df2_cropped, xvar, yvar2, activity_type2, smooth_win=21)
+                        # Convert to lists and clean NaN
+                        x2_y2 = x2_y2.tolist() if hasattr(x2_y2, 'tolist') else list(x2_y2)
+                        y2_y2 = y2_y2.tolist() if hasattr(y2_y2, 'tolist') else list(y2_y2)
+                        valid_mask = [not (np.isnan(xi) if isinstance(xi, (float, np.floating)) else False or
+                                          np.isnan(yi) if isinstance(yi, (float, np.floating)) else False)
+                                      for xi, yi in zip(x2_y2, y2_y2)]
+                        x2_y2 = [x for x, v in zip(x2_y2, valid_mask) if v]
+                        y2_y2 = [y for y, v in zip(y2_y2, valid_mask) if v]
                         x2_y2_formatted = [format_seconds_to_time(t) for t in x2_y2]
-                        fig.add_trace(go.Scatter(
-                            x=x2_y2, y=y2_y2, mode='lines',
-                            line=dict(color='#F59E0B', width=2.5, dash='dash'),
-                            name=f"Activité 2 - {y2_y2_label}",
-                            yaxis='y2',
-                            customdata=x2_y2_formatted,
-                            hovertemplate='<b>Activité 2</b><br>Temps: %{customdata}<br>' + y2_y2_label + ': %{y}<extra></extra>'
-                        ))
+                        if len(x2_y2) > 0:  # Only add trace if there's data
+                            fig.add_trace(go.Scatter(
+                                x=x2_y2, y=y2_y2, mode='lines',
+                                line=dict(color='#F59E0B', width=2.5, dash='dash'),
+                                name=f"Activité 2 - {y2_y2_label}",
+                                yaxis='y2',
+                                customdata=x2_y2_formatted,
+                                hovertemplate='<b>Activité 2</b><br>Temps: %{customdata}<br>' + y2_y2_label + ': %{y}<extra></extra>'
+                            ))
             
             # Create custom tick values and labels
             if max_x > 0:
@@ -4462,10 +5927,11 @@ def server(input, output, session):
             
             # Build layout with secondary Y-axis if needed
             layout_config = dict(
+                autosize=True,  # Responsive sizing for production
                 xaxis=dict(
-                    title="Temps", 
-                    showgrid=True, 
-                    gridcolor='rgba(128, 128, 128, 0.2)', 
+                    title="Temps",
+                    showgrid=True,
+                    gridcolor='rgba(128, 128, 128, 0.2)',
                     tickfont=dict(size=12),
                     tickmode='array',
                     tickvals=tick_vals,
@@ -4473,13 +5939,13 @@ def server(input, output, session):
                     range=[0, max_x * 1.02]  # Add 2% padding
                 ),
                 yaxis=dict(
-                    title=y1_label, 
-                    showgrid=True, 
-                    gridcolor='rgba(128, 128, 128, 0.2)', 
+                    title=y1_label,
+                    showgrid=True,
+                    gridcolor='rgba(128, 128, 128, 0.2)',
                     tickfont=dict(size=12),
-                    titlefont=dict(color='#D92323')
+                    title_font=dict(color='#D92323')
                 ),
-                plot_bgcolor='white', 
+                plot_bgcolor='white',
                 height=600, 
                 hovermode='x unified',
                 legend=dict(x=0.01, y=0.99, bgcolor='rgba(255,255,255,0.9)', font=dict(size=11)),
@@ -4489,22 +5955,79 @@ def server(input, output, session):
             
             # Add secondary Y-axis if selected
             if yvar2:
-                layout_config['yaxis2'] = dict(
+                yaxis2_config = dict(
                     title=y1_y2_label if 'y1_y2_label' in locals() else yvar2_input,
                     overlaying='y',
                     side='right',
                     showgrid=False,
                     tickfont=dict(size=12),
-                    titlefont=dict(color='#666')
+                    title_font=dict(color='#666')
                 )
+
+                # Add pace formatting for secondary Y-axis if it's pace (min/km)
+                if yvar2 == "pace":
+                    # Collect all y2 values to determine range
+                    all_y2_values = []
+                    if 'y1_y2' in locals() and y1_y2 is not None:
+                        all_y2_values.extend([v for v in y1_y2 if v is not None and not np.isnan(v)])
+                    if 'y2_y2' in locals() and y2_y2 is not None:
+                        all_y2_values.extend([v for v in y2_y2 if v is not None and not np.isnan(v)])
+
+                    if all_y2_values:
+                        y2_min = min(all_y2_values)
+                        y2_max = max(all_y2_values)
+
+                        # Generate pace tick values (e.g., 3:00, 3:30, 4:00, etc.)
+                        y2_min_minutes = int(y2_min // 60)
+                        y2_max_minutes = int(y2_max // 60) + 1
+
+                        pace_ticks = []
+                        for minute in range(y2_min_minutes, y2_max_minutes + 1):
+                            pace_ticks.append(minute * 60)  # On the minute
+                            if minute < y2_max_minutes:
+                                pace_ticks.append(minute * 60 + 30)  # Half minute
+
+                        pace_ticks = [t for t in pace_ticks if y2_min <= t <= y2_max]
+
+                        # Format pace labels as MM:SS
+                        def format_pace(seconds):
+                            minutes = int(seconds // 60)
+                            secs = int(seconds % 60)
+                            return f"{minutes}:{secs:02d}"
+
+                        pace_labels = [format_pace(t) for t in pace_ticks]
+
+                        yaxis2_config['tickmode'] = 'array'
+                        yaxis2_config['tickvals'] = pace_ticks
+                        yaxis2_config['ticktext'] = pace_labels
+                        # NO reversal - slower pace (high value) at top, faster (low value) at bottom
+
+                layout_config['yaxis2'] = yaxis2_config
                 layout_config['margin'] = dict(l=70, r=90, t=50, b=70)  # More space for right axis
             
             fig.update_layout(**layout_config)
+
+            # Debug: Print figure info before returning
+            print(f"[DEBUG comparison_plot] Figure has {len(fig.data)} traces")
+            for i, trace in enumerate(fig.data):
+                print(f"[DEBUG comparison_plot] Trace {i}: name='{trace.name}', x_len={len(trace.x) if trace.x is not None else 0}, y_len={len(trace.y) if trace.y is not None else 0}")
+
             return fig
         except Exception as e:
-            print(f"Error in comparison_plot: {e}")
+            print(f"[DEBUG comparison_plot] Exception: {str(e)}")
+            import traceback
+            traceback.print_exc()
             fig = go.Figure()
-            fig.add_annotation(text=f"Erreur: {str(e)}", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=16, color="#dc2626"))
+            # Sanitize error message - truncate and remove Plotly documentation text
+            error_msg = str(e)
+            # Truncate very long error messages (likely contain Plotly docs)
+            if len(error_msg) > 150:
+                error_msg = error_msg[:147] + "..."
+            # Remove common Plotly documentation patterns
+            doc_patterns = ["rangebreaks", "rangemode", "scaleanchor", "extrema of the input data", "tozero", "nonnegative"]
+            if any(pattern in error_msg.lower() for pattern in doc_patterns):
+                error_msg = "Erreur de configuration du graphique. Veuillez reessayer."
+            fig.add_annotation(text=f"Erreur: {error_msg}", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=16, color="#dc2626"))
             fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False), height=600, plot_bgcolor="white")
             return fig
     
@@ -4563,7 +6086,7 @@ def server(input, output, session):
             traceback.print_exc()
             return ui.div(
                 ui.card(
-                    ui.card_header("⚠️ Erreur"),
+                    ui.card_header("Erreur"),
                     ui.div(f"Erreur lors du calcul des statistiques: {str(e)}", style="padding: 1rem; color: #dc2626;")
                 )
             )
@@ -4717,15 +6240,14 @@ def server(input, output, session):
                 'name': 'Temps de contact (GCT)',
                 'key': 'gct',
                 'unit': 'ms',
-                'format': lambda x: f"{x:.0f}",
-                'icon': '⏱️'
+                'format': lambda x: f"{x:.0f}"
             },
             {
-                'name': 'Rigidité ressort jambe (LSS)',
+                'name': 'Leg Spring Stiffness (LSS)',
                 'key': 'lss',
                 'unit': 'kN/m',
                 'format': lambda x: f"{x:.1f}",
-                'icon': '🦵'
+                'icon': ''
             },
             {
                 'name': 'Puissance',
@@ -4969,8 +6491,7 @@ def server(input, output, session):
                     # Difficulty
                     ui.div(
                         ui.tags.label(
-                            "Difficulté de l'entraînement ",
-                            ui.tags.span("⚠️", title="", style="cursor: help; font-size: 0.9rem;"),
+                            "Difficulté de l'entraînement",
                             style="font-weight: 600; display: block; margin-bottom: 0.5rem;"
                         ),
                         ui.input_slider(f"workout_difficulty_{idx}", "", min=1, max=10, value=5, step=1, width="100%"),
@@ -4980,8 +6501,7 @@ def server(input, output, session):
                     # Motivation
                     ui.div(
                         ui.tags.label(
-                            "Niveau de motivation ",
-                            ui.tags.span("⚠️", title="", style="cursor: help; font-size: 0.9rem;"),
+                            "Niveau de motivation",
                             style="font-weight: 600; display: block; margin-bottom: 0.5rem;"
                         ),
                         ui.input_slider(f"motivation_level_{idx}", "", min=1, max=10, value=5, step=1, width="100%"),
@@ -4991,8 +6511,7 @@ def server(input, output, session):
                     # Satisfaction
                     ui.div(
                         ui.tags.label(
-                            "Satisfaction générale ",
-                            ui.tags.span("⚠️", title="", style="cursor: help; font-size: 0.9rem;"),
+                            "Satisfaction générale",
                             style="font-weight: 600; display: block; margin-bottom: 0.5rem;"
                         ),
                         ui.input_slider(f"satisfaction_rating_{idx}", "", min=1, max=5, value=3, step=1, width="100%"),
@@ -5159,136 +6678,74 @@ def server(input, output, session):
     @output
     @render.ui
     def daily_activity_selector():
-        """Calendar date picker and activity list for daily post-workout questionnaire"""
+        """Activity selector for daily post-workout questionnaire - uses same list as Analyse de séance"""
+        # Explicitly depend on authentication state to re-render on login
+        _ = is_authenticated.get()
         athlete_id = user_athlete_id.get()
-        if not athlete_id:
-            return ui.div()
+        role = user_role.get()
 
-        from datetime import date, timedelta
-
-        # Calculate date range for calendar (data starts August 17, 2024)
-        max_date = date.today()
-        min_date = date(2024, 8, 17)  # First date with data available
-
-        return ui.div(
-            # Date picker
-            ui.div(
-                ui.input_date(
-                    "daily_selected_date",
-                    "Sélectionner la date:",
-                    value=date.today(),
-                    min=min_date,
-                    max=max_date,
-                    width="250px"
-                ),
-                style="margin-bottom: 1rem;"
-            ),
-            # Activities for selected date
-            ui.output_ui("daily_activities_for_date")
-        )
-
-    @output
-    @render.ui
-    def daily_activities_for_date():
-        """Display activities for the selected date"""
-        athlete_id = user_athlete_id.get()
-        if not athlete_id:
-            return ui.div()
-
-        try:
-            # Get selected date, default to today if not available yet
-            try:
-                selected_date = input.daily_selected_date()
-            except:
-                selected_date = date.today()
-
-            # Filter for running activities only (exclude cross-training)
-            params = {
-                "athlete_id": f"eq.{athlete_id}",
-                "date": f"eq.{selected_date}",
-                "type": "in.(Run,TrailRun,VirtualRun)"
-            }
-
-            df = supa_select(
-                "activity_metadata",
-                select="activity_id,type,date,start_time,distance_m,duration_sec",
-                params=params,
-                limit=50
-            )
-
-            if df.empty:
-                return ui.div(
-                    ui.tags.p(f"Aucun entraînement trouvé le {selected_date}",
-                        style="color: #666; font-style: italic;"),
-                    style="padding: 1rem; background: #fff3cd; border-radius: 4px;"
-                )
-
-            # Sort by start time
-            df = df.sort_values("start_time", ascending=True)
-
-            # Build choices dictionary
-            choices = {}
-            type_labels = {
-                "run": "Course",
-                "trailrun": "Trail",
-                "virtualrun": "Tapis"
-            }
-
-            for _, row in df.iterrows():
-                activity_id = row["activity_id"]
-                type_label = type_labels.get(str(row.get("type", "")).lower(), str(row.get("type", "Activité")))
-
-                # Format start time - handle ISO 8601 and other datetime formats
-                start_time_raw = row.get("start_time", "")
-                if start_time_raw:
-                    start_time_str = str(start_time_raw)
-                    # ISO 8601 format: "2025-07-30T21:40:25+00:00"
-                    if "T" in start_time_str:
-                        time_part = start_time_str.split("T")[1][:5]  # Get HH:MM
-                        start_time = time_part
-                    # SQL datetime format: "2025-07-16 08:30:00"
-                    elif " " in start_time_str:
-                        start_time = start_time_str.split(" ")[1][:5]  # Get HH:MM
-                    # Time only format: "08:30:00"
-                    else:
-                        start_time = start_time_str[:5]
-                else:
-                    start_time = "??:??"
-
-                # Format duration
-                duration_sec = row.get("duration_sec", 0)
-                if pd.notna(duration_sec) and duration_sec > 0:
-                    minutes = int(duration_sec / 60)
-                    time_str = f"{minutes}min"
-                else:
-                    time_str = "0min"
-
-                # Format distance
-                distance_m = row.get("distance_m", 0)
-                if pd.notna(distance_m) and distance_m > 0:
-                    distance_km = distance_m / 1000
-                    dist_str = f"{distance_km:.1f}km"
-                else:
-                    dist_str = "0km"
-
-                label = f"{start_time} - {type_label} - {time_str} - {dist_str}"
-                choices[activity_id] = label
-
-            return ui.input_select(
-                "daily_selected_activity",
-                "Choisir l'entraînement:",
-                choices=choices,
-                width="100%"
-            )
-
-        except Exception as e:
-            print(f"Error loading activities for date: {e}")
-            traceback.print_exc()
+        # For coach, show message (coaches can't fill questionnaires)
+        if role == "coach":
             return ui.div(
-                ui.tags.p("Erreur lors du chargement des entraînements",
-                    style="color: #ef4444;"),
-                style="padding: 1rem;"
+                ui.tags.p("Les questionnaires sont reserves aux athletes.",
+                    style="color: #666; font-style: italic;")
             )
+
+        if not athlete_id:
+            return ui.div(
+                ui.tags.p("Veuillez vous connecter pour voir vos entrainements.",
+                    style="color: #666; font-style: italic;")
+            )
+
+        # Use the same activity list as "Analyse de séance" (act_label_to_id)
+        labels_map = act_label_to_id.get()
+
+        if not labels_map:
+            return ui.div(
+                ui.tags.p("Aucun entrainement dans la periode selectionnee. Ajustez les dates ci-dessus.",
+                    style="color: #666; font-style: italic;"),
+                style="padding: 1rem; background: #fff3cd; border-radius: 4px;"
+            )
+
+        # Get activity IDs that already have surveys filled
+        filled_activity_ids = set()
+        try:
+            all_activity_ids = list(labels_map.values())
+            if all_activity_ids:
+                surveys_df = supa_select(
+                    "daily_workout_surveys",
+                    select="activity_id",
+                    params={
+                        "athlete_id": f"eq.{athlete_id}",
+                        "activity_id": f"in.({','.join(str(aid) for aid in all_activity_ids)})"
+                    },
+                    limit=1000
+                )
+                if not surveys_df.empty:
+                    filled_activity_ids = set(surveys_df["activity_id"].astype(str).tolist())
+        except Exception as e:
+            print(f"Warning: Could not check filled surveys: {e}")
+
+        # Build choices excluding already filled activities
+        choices = {
+            activity_id: label
+            for label, activity_id in labels_map.items()
+            if str(activity_id) not in filled_activity_ids
+        }
+
+        if not choices:
+            return ui.div(
+                ui.tags.p("Tous les questionnaires de la periode ont ete remplis!",
+                    style="color: #16a34a; font-style: italic;"),
+                style="padding: 1rem; background: #f0fdf4; border-radius: 4px; border: 1px solid #16a34a;"
+            )
+
+        return ui.input_select(
+            "daily_selected_activity",
+            "Choisir l'entrainement:",
+            choices=choices,
+            width="100%"
+        )
 
     # DAILY QUESTIONNAIRE: Already Filled Check
     @output
@@ -5622,6 +7079,43 @@ def server(input, output, session):
     # Reactive value for weekly survey save status
     weekly_survey_save_status = reactive.Value(None)
 
+    def get_athlete_typical_weight(athlete_id: int) -> tuple:
+        """Fetch athlete's typical weight from previous entries.
+
+        Returns:
+            tuple: (typical_weight, entry_count) where typical_weight is the median of previous entries
+        """
+        try:
+            # Query previous weight entries for this athlete
+            response = requests.get(
+                f"{SUPABASE_URL}/rest/v1/weekly_wellness_surveys",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json"
+                },
+                params={
+                    "athlete_id": f"eq.{athlete_id}",
+                    "poids": "not.is.null",
+                    "select": "poids",
+                    "order": "week_start_date.desc",
+                    "limit": 20  # Use last 20 entries to calculate typical weight
+                }
+            )
+
+            if response.status_code == 200:
+                entries = response.json()
+                if entries and len(entries) > 0:
+                    weights = [e["poids"] for e in entries if e.get("poids")]
+                    if weights:
+                        # Use median for robustness against outliers
+                        import statistics
+                        return (statistics.median(weights), len(weights))
+            return (None, 0)
+        except Exception as e:
+            print(f"Error fetching typical weight: {e}")
+            return (None, 0)
+
     @reactive.Effect
     @reactive.event(input.submit_weekly_survey)
     def handle_weekly_survey_submit():
@@ -5637,6 +7131,33 @@ def server(input, output, session):
             if not week_start:
                 weekly_survey_save_status.set({"success": False, "message": "Veuillez sélectionner une semaine"})
                 return
+
+            # ===== WEIGHT VALIDATION (30% threshold) =====
+            new_weight = float(input.weekly_poids()) if input.weekly_poids() else None
+            if new_weight is not None:
+                typical_weight, entry_count = get_athlete_typical_weight(athlete_id)
+
+                if typical_weight is not None and entry_count >= 1:
+                    # Calculate 30% threshold
+                    lower_bound = typical_weight * 0.70  # 30% lower
+                    upper_bound = typical_weight * 1.30  # 30% higher
+
+                    if new_weight < lower_bound or new_weight > upper_bound:
+                        # Weight is outside acceptable range - likely lbs/kg confusion
+                        if new_weight < lower_bound:
+                            error_msg = (
+                                f"Poids invalide: {new_weight:.1f} kg est trop bas. "
+                                f"Votre poids habituel est ~{typical_weight:.1f} kg. "
+                                f"Avez-vous entré le poids en livres (lbs) par erreur?"
+                            )
+                        else:
+                            error_msg = (
+                                f"Poids invalide: {new_weight:.1f} kg est trop élevé. "
+                                f"Votre poids habituel est ~{typical_weight:.1f} kg. "
+                                f"Avez-vous entré le poids en livres (lbs) par erreur?"
+                            )
+                        weekly_survey_save_status.set({"success": False, "message": error_msg})
+                        return
 
             # Collect form data
             oslo_symptomes = input.weekly_oslo_symptomes() == "Oui"
@@ -5838,7 +7359,7 @@ def server(input, output, session):
                         ui.tags.p(f"Douleurs: {'Oui' if data['physical_condition']['muscle_soreness'] else 'Non'}", style="margin: 0.5rem 0;"),
                         ui.tags.p(f"Difficulté: {data['training_perception']['workout_difficulty']}/10", style="margin: 0.5rem 0;"),
                         ui.tags.p(f"Motivation: {data['training_perception']['motivation_level']}/10", style="margin: 0.5rem 0;"),
-                        ui.tags.p(f"⭐ Satisfaction: {data['training_perception']['satisfaction_rating']}/5", style="margin: 0.5rem 0;"),
+                        ui.tags.p(f"Satisfaction: {data['training_perception']['satisfaction_rating']}/5", style="margin: 0.5rem 0;"),
                         ui.tags.p(f"Humeur: {data['additional_notes']['mood']}", style="margin: 0.5rem 0;"),
                         style="padding: 1rem; background: #f9f9f9; border-radius: 6px; margin-bottom: 1rem;"
                     ),
@@ -5868,6 +7389,10 @@ def server(input, output, session):
     zones_data = reactive.Value([])  # Current zones from database
     zones_save_status = reactive.Value(None)  # Save status message for zones
     zones_selected_athlete = reactive.Value(None)  # Selected athlete for zone configuration (coach only)
+
+    # Lactate tests reactive values
+    lactate_tests_data = reactive.Value([])  # Current lactate tests from database
+    lactate_tests_save_status = reactive.Value(None)  # Save status message for lactate tests
 
     # Distance definitions
     DISTANCES = [
@@ -5983,6 +7508,9 @@ def server(input, output, session):
         # Personal Records Card (Athletes only)
         if role == "athlete":
             cards.append(personal_records_card())
+
+        # Lactate Tests Card (Both Coaches and Athletes)
+        cards.append(lactate_tests_card())
 
         # Training Zones Card (Both Coaches and Athletes)
         cards.append(training_zones_card())
@@ -6106,6 +7634,138 @@ def server(input, output, session):
             style="margin-bottom: 2rem;"
         )
 
+    def lactate_tests_card():
+        """Build Lactate Tests data entry card for athletes and coaches"""
+        role = user_role.get()
+
+        # Determine target athlete (same logic as training zones)
+        if role == "coach":
+            target_athlete_id = zones_selected_athlete.get()
+        else:
+            target_athlete_id = user_athlete_id.get()
+
+        current_tests = lactate_tests_data.get()
+
+        # Athlete selector (coach only) - reuse zones_selected_athlete
+        athlete_selector = ui.div()
+        if role == "coach":
+            athlete_choices = {row["athlete_id"]: row["name"] for _, row in athletes_df.iterrows()}
+            athlete_selector = ui.div(
+                ui.input_select(
+                    "lactate_athlete_select",
+                    "Selectionner un athlete:",
+                    choices={"": "-- Choisir un athlete --", **athlete_choices},
+                    selected=target_athlete_id if target_athlete_id else "",
+                    width="100%"
+                ),
+                style="margin-bottom: 1.5rem; padding: 1rem; background: #f9fafb; border-radius: 8px;"
+            )
+
+        # Build table rows for existing tests
+        table_rows = []
+        for test in current_tests:
+            test_date = test.get("test_date", "")
+            distance_m = test.get("distance_m", "")
+            lactate = test.get("lactate_mmol", "")
+            test_id = test.get("id", "")
+
+            table_rows.append(
+                ui.tags.tr(
+                    ui.tags.td(str(test_date), style="padding: 0.75rem; border-bottom: 1px solid #e5e7eb;"),
+                    ui.tags.td(f"{distance_m} m", style="padding: 0.75rem; border-bottom: 1px solid #e5e7eb; text-align: center;"),
+                    ui.tags.td(f"{lactate} mmol/L", style="padding: 0.75rem; border-bottom: 1px solid #e5e7eb; text-align: center;"),
+                    ui.tags.td(
+                        ui.input_action_button(
+                            f"delete_lactate_{test_id}",
+                            "Supprimer",
+                            class_="btn btn-sm btn-outline-danger",
+                            style="padding: 0.25rem 0.5rem; font-size: 0.8rem;"
+                        ),
+                        style="padding: 0.75rem; border-bottom: 1px solid #e5e7eb; text-align: center;"
+                    )
+                )
+            )
+
+        # Empty state if no tests
+        if not table_rows:
+            table_rows.append(
+                ui.tags.tr(
+                    ui.tags.td(
+                        "Aucun test de lactate enregistré",
+                        colspan=4,
+                        style="padding: 2rem; text-align: center; color: #666; font-style: italic;"
+                    )
+                )
+            )
+
+        return ui.card(
+            ui.card_header(
+                ui.div(
+                    ui.tags.h3("Tests de lactate", style="margin: 0; color: #D92323;"),
+                    ui.tags.p("Enregistrez vos résultats de tests de lactate",
+                             style="margin: 0.5rem 0 0 0; color: white; font-size: 1rem;"),
+                    style="padding: 0.5rem 0;"
+                )
+            ),
+            ui.div(
+                # Athlete selector (coach only)
+                athlete_selector,
+
+                # Status message
+                ui.div(
+                    ui.output_ui("lactate_status_message"),
+                    style="margin-bottom: 1rem;"
+                ),
+
+                # New test entry form
+                ui.div(
+                    ui.tags.h4("Nouveau test", style="margin-bottom: 1rem; color: #333;"),
+                    ui.row(
+                        ui.column(4,
+                            ui.tags.label("Date du test", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
+                            ui.input_date("lactate_test_date", "", value=str(datetime.now().date()), width="100%")
+                        ),
+                        ui.column(4,
+                            ui.tags.label("Distance (mètres)", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
+                            ui.input_numeric("lactate_distance_m", "", value=None, min=100, max=50000, step=100, width="100%")
+                        ),
+                        ui.column(4,
+                            ui.tags.label("Lactate (mmol/L)", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
+                            ui.input_numeric("lactate_mmol", "", value=None, min=0.0, max=30.0, step=0.1, width="100%")
+                        )
+                    ),
+                    ui.div(
+                        ui.input_action_button(
+                            "save_lactate_test",
+                            "Ajouter le test",
+                            class_="btn btn-primary",
+                            style="background: #D92323; border: none; padding: 0.75rem 2rem; font-weight: 600; margin-top: 1rem;"
+                        ),
+                        style="text-align: right;"
+                    ),
+                    style="background: #f9fafb; padding: 1.5rem; border-radius: 8px; margin-bottom: 2rem;"
+                ),
+
+                # Existing tests table
+                ui.tags.h4("Tests enregistrés", style="margin-bottom: 1rem; color: #333;"),
+                ui.tags.table(
+                    ui.tags.thead(
+                        ui.tags.tr(
+                            ui.tags.th("Date", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; border-bottom: 2px solid #D92323;"),
+                            ui.tags.th("Distance", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; text-align: center; border-bottom: 2px solid #D92323;"),
+                            ui.tags.th("Lactate", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; text-align: center; border-bottom: 2px solid #D92323;"),
+                            ui.tags.th("Actions", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; text-align: center; border-bottom: 2px solid #D92323;")
+                        )
+                    ),
+                    ui.tags.tbody(*table_rows),
+                    style="width: 100%; border-collapse: collapse; border: 1px solid #e5e7eb;"
+                ),
+
+                style="padding: 1.5rem;"
+            ),
+            style="margin-bottom: 2rem;"
+        )
+
     def training_zones_card():
         """Build Training Zones configuration card"""
         role = user_role.get()
@@ -6116,85 +7776,22 @@ def server(input, output, session):
         else:
             target_athlete_id = user_athlete_id.get()
 
-        # Get current zones
+        # Get current zones for initial num_zones value
         current_zones = zones_data.get()
-
-        # Determine current configuration
-        num_zones = len(current_zones) if current_zones else 6  # Default to 6 zones
+        num_zones = len(current_zones) if current_zones else 5  # Default to 5 zones
         effective_date = current_zones[0].get("effective_from_date") if current_zones else None
-
-        # Build zone input rows (always show all 10 zones, but hide inactive ones with CSS)
-        zone_rows = []
-        for zone_num in range(1, 11):
-            # Find current zone data
-            zone_data = next((z for z in current_zones if z.get("zone_number") == zone_num), {}) if current_zones else {}
-
-            # Get current values
-            hr_min = zone_data.get("hr_min", "")
-            hr_max = zone_data.get("hr_max", "")
-            pace_min_sec = zone_data.get("pace_min_sec_per_km")
-            pace_max_sec = zone_data.get("pace_max_sec_per_km")
-            pace_min = pace_seconds_to_mmss(pace_min_sec) if pace_min_sec else ""
-            pace_max = pace_seconds_to_mmss(pace_max_sec) if pace_max_sec else ""
-            lactate_min = zone_data.get("lactate_min", "")
-            lactate_max = zone_data.get("lactate_max", "")
-
-            # Zone row ID for dynamic show/hide
-            row_class = f"zone-row zone-row-{zone_num}"
-
-            zone_rows.append(
-                ui.tags.tr(
-                    # Zone number
-                    ui.tags.td(
-                        ui.tags.strong(f"Zone {zone_num}"),
-                        style="padding: 0.75rem; vertical-align: middle; font-weight: 600;"
-                    ),
-                    # HR Min
-                    ui.tags.td(
-                        ui.input_numeric(f"zone_{zone_num}_hr_min", "", value=hr_min if hr_min else None, min=0, max=250, width="80px"),
-                        style="padding: 0.75rem; vertical-align: middle;"
-                    ),
-                    # HR Max
-                    ui.tags.td(
-                        ui.input_numeric(f"zone_{zone_num}_hr_max", "", value=hr_max if hr_max else None, min=0, max=250, width="80px"),
-                        style="padding: 0.75rem; vertical-align: middle;"
-                    ),
-                    # Pace Min (MM:SS)
-                    ui.tags.td(
-                        ui.input_text(f"zone_{zone_num}_pace_min", "", value=pace_min, placeholder="MM:SS", width="80px"),
-                        style="padding: 0.75rem; vertical-align: middle;"
-                    ),
-                    # Pace Max (MM:SS)
-                    ui.tags.td(
-                        ui.input_text(f"zone_{zone_num}_pace_max", "", value=pace_max, placeholder="MM:SS", width="80px"),
-                        style="padding: 0.75rem; vertical-align: middle;"
-                    ),
-                    # Lactate Min
-                    ui.tags.td(
-                        ui.input_numeric(f"zone_{zone_num}_lactate_min", "", value=lactate_min if lactate_min else None, min=0, max=30, step=0.1, width="80px"),
-                        style="padding: 0.75rem; vertical-align: middle;"
-                    ),
-                    # Lactate Max
-                    ui.tags.td(
-                        ui.input_numeric(f"zone_{zone_num}_lactate_max", "", value=lactate_max if lactate_max else None, min=0, max=30, step=0.1, width="80px"),
-                        style="padding: 0.75rem; vertical-align: middle;"
-                    ),
-                    **{"class": row_class}
-                )
-            )
 
         # Athlete selector (coach only)
         athlete_selector = ui.div()
         if role == "coach":
-            # Get list of coached athletes
-            athletes_list = available_athletes.get()
-            athlete_choices = {a["athlete_id"]: f"{a['first_name']} {a['last_name']}" for a in athletes_list}
+            # Get list of coached athletes from athletes_df (defined in server scope)
+            athlete_choices = {row["athlete_id"]: row["name"] for _, row in athletes_df.iterrows()}
 
             athlete_selector = ui.div(
                 ui.input_select(
                     "zones_athlete_select",
-                    "Sélectionner un athlète:",
-                    choices={"": "— Choisir un athlète —", **athlete_choices},
+                    "Selectionner un athlete:",
+                    choices={"": "-- Choisir un athlete --", **athlete_choices},
                     selected=target_athlete_id if target_athlete_id else "",
                     width="100%"
                 ),
@@ -6204,8 +7801,8 @@ def server(input, output, session):
         return ui.card(
             ui.card_header(
                 ui.div(
-                    ui.tags.h3("Zones d'entraînement", style="margin: 0; color: #D92323;"),
-                    ui.tags.p("Configuration des zones d'entraînement (FC, Allure, Lactate)",
+                    ui.tags.h3("Zones d'entrainement", style="margin: 0; color: #D92323;"),
+                    ui.tags.p("Configuration des zones d'entrainement (FC, Allure, Lactate)",
                              style="margin: 0.5rem 0 0 0; color: white; font-size: 1rem;"),
                     style="padding: 0.5rem 0;"
                 )
@@ -6227,7 +7824,7 @@ def server(input, output, session):
                             6,
                             ui.input_date(
                                 "zones_effective_date",
-                                "Date d'entrée en vigueur:",
+                                "Date d'entree en vigueur:",
                                 value=effective_date if effective_date else None,
                                 width="100%"
                             )
@@ -6246,28 +7843,9 @@ def server(input, output, session):
                     style="margin-bottom: 1.5rem; padding: 1rem; background: #f9fafb; border-radius: 8px;"
                 ),
 
-                # Zones table
+                # Zones table - DYNAMIC via output_ui
                 ui.tags.div(
-                    ui.tags.table(
-                        ui.tags.thead(
-                            ui.tags.tr(
-                                ui.tags.th("Zone", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; border-bottom: 2px solid #D92323;", rowspan="2"),
-                                ui.tags.th("Fréquence cardiaque (bpm)", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; text-align: center; border-bottom: 2px solid #D92323;", colspan="2"),
-                                ui.tags.th("Allure (min/km)", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; text-align: center; border-bottom: 2px solid #D92323;", colspan="2"),
-                                ui.tags.th("Lactate (mmol/L)", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; text-align: center; border-bottom: 2px solid #D92323;", colspan="2")
-                            ),
-                            ui.tags.tr(
-                                ui.tags.th("Min", style="padding: 0.5rem; background: #f9fafb; font-weight: 600; font-size: 0.85rem; border-bottom: 1px solid #D92323;"),
-                                ui.tags.th("Max", style="padding: 0.5rem; background: #f9fafb; font-weight: 600; font-size: 0.85rem; border-bottom: 1px solid #D92323;"),
-                                ui.tags.th("Min", style="padding: 0.5rem; background: #f9fafb; font-weight: 600; font-size: 0.85rem; border-bottom: 1px solid #D92323;"),
-                                ui.tags.th("Max", style="padding: 0.5rem; background: #f9fafb; font-weight: 600; font-size: 0.85rem; border-bottom: 1px solid #D92323;"),
-                                ui.tags.th("Min", style="padding: 0.5rem; background: #f9fafb; font-weight: 600; font-size: 0.85rem; border-bottom: 1px solid #D92323;"),
-                                ui.tags.th("Max", style="padding: 0.5rem; background: #f9fafb; font-weight: 600; font-size: 0.85rem; border-bottom: 1px solid #D92323;")
-                            )
-                        ),
-                        ui.tags.tbody(*zone_rows),
-                        style="width: 100%; border-collapse: collapse; border: 1px solid #e5e7eb;"
-                    ),
+                    ui.output_ui("zones_table_dynamic"),
                     style="overflow-x: auto;"
                 ),
 
@@ -6285,6 +7863,110 @@ def server(input, output, session):
                 style="padding: 1.5rem;"
             ),
             style="margin-bottom: 2rem;"
+        )
+
+    @output
+    @render.ui
+    def zones_table_dynamic():
+        """Dynamically render zone table rows based on zones_num_zones selection"""
+        # Get number of zones from input (reactive!)
+        try:
+            num_zones = int(input.zones_num_zones() or 5)
+        except:
+            num_zones = 5
+
+        # Get current zones data
+        current_zones = zones_data.get()
+
+        # Build zone input rows (only show zones 1 to num_zones)
+        zone_rows = []
+        for zone_num in range(1, num_zones + 1):
+            # Find current zone data
+            zone_data = next((z for z in current_zones if z.get("zone_number") == zone_num), {}) if current_zones else {}
+
+            # Get current values (handle NaN from database)
+            def safe_numeric(val):
+                """Convert database value to numeric, handling NaN"""
+                if val is None or val == "":
+                    return None
+                try:
+                    if pd.isna(val):
+                        return None
+                    return float(val)
+                except (ValueError, TypeError):
+                    return None
+
+            hr_min = safe_numeric(zone_data.get("hr_min"))
+            hr_max = safe_numeric(zone_data.get("hr_max"))
+            pace_min_sec = safe_numeric(zone_data.get("pace_min_sec_per_km"))
+            pace_max_sec = safe_numeric(zone_data.get("pace_max_sec_per_km"))
+            pace_min = pace_seconds_to_mmss(pace_min_sec) if pace_min_sec else ""
+            pace_max = pace_seconds_to_mmss(pace_max_sec) if pace_max_sec else ""
+            lactate_min = safe_numeric(zone_data.get("lactate_min"))
+            lactate_max = safe_numeric(zone_data.get("lactate_max"))
+
+            # Input width - larger for visibility
+            input_width = "100px"
+
+            zone_rows.append(
+                ui.tags.tr(
+                    # Zone number
+                    ui.tags.td(
+                        ui.tags.strong(f"Zone {zone_num}"),
+                        style="padding: 0.75rem; vertical-align: middle; font-weight: 600; text-align: center;"
+                    ),
+                    # HR Min (numeric only, integers)
+                    ui.tags.td(
+                        ui.input_numeric(f"zone_{zone_num}_hr_min", "", value=hr_min if hr_min else None, min=0, max=250, step=1, width=input_width),
+                        style="padding: 0.5rem; vertical-align: middle;"
+                    ),
+                    # HR Max (numeric only, integers)
+                    ui.tags.td(
+                        ui.input_numeric(f"zone_{zone_num}_hr_max", "", value=hr_max if hr_max else None, min=0, max=250, step=1, width=input_width),
+                        style="padding: 0.5rem; vertical-align: middle;"
+                    ),
+                    # Pace Min (MM:SS format)
+                    ui.tags.td(
+                        ui.input_text(f"zone_{zone_num}_pace_min", "", value=pace_min, placeholder="M:SS", width=input_width),
+                        style="padding: 0.5rem; vertical-align: middle;"
+                    ),
+                    # Pace Max (MM:SS format)
+                    ui.tags.td(
+                        ui.input_text(f"zone_{zone_num}_pace_max", "", value=pace_max, placeholder="M:SS", width=input_width),
+                        style="padding: 0.5rem; vertical-align: middle;"
+                    ),
+                    # Lactate Min (numeric with decimals)
+                    ui.tags.td(
+                        ui.input_numeric(f"zone_{zone_num}_lactate_min", "", value=lactate_min if lactate_min else None, min=0, max=30, step=0.1, width=input_width),
+                        style="padding: 0.5rem; vertical-align: middle;"
+                    ),
+                    # Lactate Max (numeric with decimals)
+                    ui.tags.td(
+                        ui.input_numeric(f"zone_{zone_num}_lactate_max", "", value=lactate_max if lactate_max else None, min=0, max=30, step=0.1, width=input_width),
+                        style="padding: 0.5rem; vertical-align: middle;"
+                    )
+                )
+            )
+
+        return ui.tags.table(
+            ui.tags.thead(
+                ui.tags.tr(
+                    ui.tags.th("Zone", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; border-bottom: 2px solid #D92323; text-align: center;", rowspan="2"),
+                    ui.tags.th("Frequence cardiaque (bpm)", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; text-align: center; border-bottom: 2px solid #D92323;", colspan="2"),
+                    ui.tags.th("Allure (min/km)", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; text-align: center; border-bottom: 2px solid #D92323;", colspan="2"),
+                    ui.tags.th("Lactate (mmol/L)", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; text-align: center; border-bottom: 2px solid #D92323;", colspan="2")
+                ),
+                ui.tags.tr(
+                    ui.tags.th("Min", style="padding: 0.5rem; background: #f9fafb; font-weight: 600; font-size: 0.85rem; border-bottom: 1px solid #D92323; text-align: center;"),
+                    ui.tags.th("Max", style="padding: 0.5rem; background: #f9fafb; font-weight: 600; font-size: 0.85rem; border-bottom: 1px solid #D92323; text-align: center;"),
+                    ui.tags.th("Min", style="padding: 0.5rem; background: #f9fafb; font-weight: 600; font-size: 0.85rem; border-bottom: 1px solid #D92323; text-align: center;"),
+                    ui.tags.th("Max", style="padding: 0.5rem; background: #f9fafb; font-weight: 600; font-size: 0.85rem; border-bottom: 1px solid #D92323; text-align: center;"),
+                    ui.tags.th("Min", style="padding: 0.5rem; background: #f9fafb; font-weight: 600; font-size: 0.85rem; border-bottom: 1px solid #D92323; text-align: center;"),
+                    ui.tags.th("Max", style="padding: 0.5rem; background: #f9fafb; font-weight: 600; font-size: 0.85rem; border-bottom: 1px solid #D92323; text-align: center;")
+                )
+            ),
+            ui.tags.tbody(*zone_rows),
+            style="width: 100%; border-collapse: collapse; border: 1px solid #e5e7eb;"
         )
     
     # Load PRs when tab is accessed
@@ -6343,12 +8025,12 @@ def server(input, output, session):
         elif status["type"] == "warning":
             return ui.div(
                 ui.tags.div(
-                    ui.tags.h4("⚠️ " + status["title"], style="color: #f59e0b; margin-bottom: 0.5rem;"),
+                    ui.tags.h4("Attention: " + status["title"], style="color: #f59e0b; margin-bottom: 0.5rem;"),
                     ui.tags.p(status["message"], style="color: #666; margin: 0;"),
                     style="padding: 1rem; background: #fffbeb; border: 2px solid #f59e0b; border-radius: 8px;"
                 )
             )
-        
+
         return ui.div()
 
     # Status message display for training zones
@@ -6363,7 +8045,7 @@ def server(input, output, session):
         if status["type"] == "success":
             return ui.div(
                 ui.tags.div(
-                    ui.tags.h4("✓ " + status["title"], style="color: #16a34a; margin-bottom: 0.5rem;"),
+                    ui.tags.h4(status["title"], style="color: #16a34a; margin-bottom: 0.5rem;"),
                     ui.tags.p(status["message"], style="color: #666; margin: 0;"),
                     style="padding: 1rem; background: #f0fdf4; border: 2px solid #16a34a; border-radius: 8px;"
                 )
@@ -6371,7 +8053,7 @@ def server(input, output, session):
         elif status["type"] == "error":
             return ui.div(
                 ui.tags.div(
-                    ui.tags.h4("✗ " + status["title"], style="color: #dc2626; margin-bottom: 0.5rem;"),
+                    ui.tags.h4(status["title"], style="color: #dc2626; margin-bottom: 0.5rem;"),
                     ui.tags.p(status["message"], style="color: #666; margin: 0;"),
                     style="padding: 1rem; background: #fee; border: 2px solid #dc2626; border-radius: 8px;"
                 )
@@ -6379,13 +8061,217 @@ def server(input, output, session):
         elif status["type"] == "warning":
             return ui.div(
                 ui.tags.div(
-                    ui.tags.h4("⚠️ " + status["title"], style="color: #f59e0b; margin-bottom: 0.5rem;"),
+                    ui.tags.h4("Attention: " + status["title"], style="color: #f59e0b; margin-bottom: 0.5rem;"),
                     ui.tags.p(status["message"], style="color: #666; margin: 0;"),
                     style="padding: 1rem; background: #fffbeb; border: 2px solid #f59e0b; border-radius: 8px;"
                 )
             )
 
         return ui.div()
+
+    # ========== LACTATE TESTS HANDLERS ==========
+
+    # Handle lactate athlete selection (coach only)
+    @reactive.Effect
+    @reactive.event(input.lactate_athlete_select)
+    def handle_lactate_athlete_select():
+        """Update zones_selected_athlete when coach selects athlete in lactate card"""
+        selected = input.lactate_athlete_select()
+        if selected and selected != "":
+            zones_selected_athlete.set(selected)
+            # Reload lactate tests for the selected athlete
+            load_lactate_tests_for_athlete(selected)
+
+    def load_lactate_tests_for_athlete(athlete_id):
+        """Load lactate tests for a specific athlete"""
+        if not athlete_id:
+            lactate_tests_data.set([])
+            return
+
+        try:
+            response = requests.get(
+                f"{SUPABASE_URL}/rest/v1/lactate_tests",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json"
+                },
+                params={
+                    "athlete_id": f"eq.{athlete_id}",
+                    "select": "*",
+                    "order": "test_date.desc,distance_m.asc"
+                }
+            )
+
+            if response.status_code == 200:
+                tests = response.json()
+                lactate_tests_data.set(tests)
+            else:
+                print(f"Error loading lactate tests: {response.text}")
+                lactate_tests_data.set([])
+        except Exception as e:
+            print(f"Error loading lactate tests: {e}")
+            lactate_tests_data.set([])
+
+    # Load lactate tests when authenticated
+    @reactive.Effect
+    @reactive.event(is_authenticated)
+    def load_lactate_tests():
+        """Load current lactate tests from database"""
+        if not is_authenticated.get():
+            return
+
+        role = user_role.get()
+        if role == "coach":
+            # Coach: use selected athlete from zones_selected_athlete
+            athlete_id = zones_selected_athlete.get()
+        else:
+            # Athlete: use own ID
+            athlete_id = user_athlete_id.get()
+
+        if not athlete_id:
+            return
+
+        try:
+            # Query lactate tests using requests
+            response = requests.get(
+                f"{SUPABASE_URL}/rest/v1/lactate_tests",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json"
+                },
+                params={
+                    "athlete_id": f"eq.{athlete_id}",
+                    "select": "*",
+                    "order": "test_date.desc,distance_m.asc"
+                }
+            )
+
+            if response.status_code == 200:
+                tests = response.json()
+                lactate_tests_data.set(tests)
+            else:
+                print(f"Error loading lactate tests: {response.text}")
+                lactate_tests_data.set([])
+        except Exception as e:
+            print(f"Error loading lactate tests: {e}")
+            lactate_tests_data.set([])
+
+    # Status message display for lactate tests
+    @output
+    @render.ui
+    def lactate_status_message():
+        """Display lactate tests save status message"""
+        status = lactate_tests_save_status.get()
+        if not status:
+            return ui.div()
+
+        if status["type"] == "success":
+            return ui.div(
+                ui.tags.div(
+                    ui.tags.h4(status["title"], style="color: #16a34a; margin-bottom: 0.5rem;"),
+                    ui.tags.p(status["message"], style="color: #666; margin: 0;"),
+                    style="padding: 1rem; background: #f0fdf4; border: 2px solid #16a34a; border-radius: 8px;"
+                )
+            )
+        elif status["type"] == "error":
+            return ui.div(
+                ui.tags.div(
+                    ui.tags.h4(status["title"], style="color: #dc2626; margin-bottom: 0.5rem;"),
+                    ui.tags.p(status["message"], style="color: #666; margin: 0;"),
+                    style="padding: 1rem; background: #fee; border: 2px solid #dc2626; border-radius: 8px;"
+                )
+            )
+
+        return ui.div()
+
+    # Handle save lactate test
+    @reactive.Effect
+    @reactive.event(input.save_lactate_test)
+    def handle_save_lactate_test():
+        """Save new lactate test to database"""
+        # Determine target athlete (coach uses selected athlete, athlete uses own ID)
+        role = user_role.get()
+        if role == "coach":
+            athlete_id = zones_selected_athlete.get()
+            if not athlete_id:
+                lactate_tests_save_status.set({"type": "error", "title": "Erreur", "message": "Veuillez sélectionner un athlète"})
+                return
+        else:
+            athlete_id = user_athlete_id.get()
+            if not athlete_id:
+                lactate_tests_save_status.set({"type": "error", "title": "Erreur", "message": "Athlète non identifié"})
+                return
+
+        try:
+            # Get form values
+            test_date = input.lactate_test_date()
+            distance_m = input.lactate_distance_m()
+            lactate_mmol = input.lactate_mmol()
+
+            # Validate required fields
+            if not test_date:
+                lactate_tests_save_status.set({"type": "error", "title": "Erreur", "message": "Veuillez sélectionner une date"})
+                return
+            if not distance_m:
+                lactate_tests_save_status.set({"type": "error", "title": "Erreur", "message": "Veuillez entrer une distance"})
+                return
+            if lactate_mmol is None:
+                lactate_tests_save_status.set({"type": "error", "title": "Erreur", "message": "Veuillez entrer une valeur de lactate"})
+                return
+
+            # Build record
+            record = {
+                "athlete_id": athlete_id,
+                "test_date": str(test_date),
+                "distance_m": int(distance_m),
+                "lactate_mmol": float(lactate_mmol)
+            }
+
+            # Insert into database
+            response = requests.post(
+                f"{SUPABASE_URL}/rest/v1/lactate_tests",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal"
+                },
+                json=record
+            )
+
+            if response.status_code in [200, 201]:
+                lactate_tests_save_status.set({
+                    "type": "success",
+                    "title": "Test enregistré",
+                    "message": f"Test du {test_date}: {distance_m}m - {lactate_mmol} mmol/L"
+                })
+                # Reload tests
+                load_lactate_tests()
+            else:
+                error_msg = response.text
+                if "unique_lactate_test" in error_msg:
+                    lactate_tests_save_status.set({
+                        "type": "error",
+                        "title": "Erreur",
+                        "message": "Un test avec cette date et distance existe déjà"
+                    })
+                else:
+                    lactate_tests_save_status.set({
+                        "type": "error",
+                        "title": "Erreur",
+                        "message": f"Erreur lors de l'enregistrement: {error_msg}"
+                    })
+
+        except Exception as e:
+            print(f"Error saving lactate test: {e}")
+            traceback.print_exc()
+            lactate_tests_save_status.set({
+                "type": "error",
+                "title": "Erreur",
+                "message": f"Erreur: {str(e)}"
+            })
 
     # Handle save
     @reactive.Effect
@@ -6717,7 +8603,22 @@ def server(input, output, session):
     # ----------------- Phase 1.5: Intervals Visualization - REMOVED -----------------
     # Will be implemented later
 
-app = App(app_ui, server)
+# Create app with error handling for production debugging
+try:
+    app = App(app_ui, server)
+except Exception as e:
+    import traceback
+    error_msg = f"App initialization failed: {str(e)}\n\n{traceback.format_exc()}"
+    print(f"[ERROR] {error_msg}")
+
+    # Create a simple error page so we can see what went wrong
+    error_ui = ui.page_fluid(
+        ui.h1("Erreur d'initialisation"),
+        ui.pre(error_msg, style="background: #fee; padding: 20px; overflow: auto;")
+    )
+    def error_server(input, output, session):
+        pass
+    app = App(error_ui, error_server)
 
 if __name__ == "__main__":
     import uvicorn

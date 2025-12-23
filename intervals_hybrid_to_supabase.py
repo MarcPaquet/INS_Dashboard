@@ -5,7 +5,31 @@ Strategy: Prioritize FIT files (complete data + Stryd metrics),
 fallback to Streams API if FIT unavailable.
 
 Usage:
-    python intervals_hybrid_to_supabase.py [--oldest YYYY-MM-DD] [--newest YYYY-MM-DD] [--athlete NAME] [--dry-run]
+    # Import activities for a date range
+    python intervals_hybrid_to_supabase.py --oldest 2024-01-01 --newest 2024-12-31
+
+    # Import for specific athlete only
+    python intervals_hybrid_to_supabase.py --athlete "Matthew Beaudet" --oldest 2024-01-01 --newest 2024-12-31
+
+    # Dry-run mode (no actual inserts)
+    python intervals_hybrid_to_supabase.py --oldest 2024-01-01 --newest 2024-12-31 --dry-run
+
+    # BULK IMPORT: Parallel import with wellness, skip weather (12-15 athletes safe)
+    python intervals_hybrid_to_supabase.py --athlete "Matthew Beaudet" --oldest 2021-01-01 --newest 2024-12-31 --wellness-oldest 2021-01-01 --wellness-newest 2024-12-31 --skip-weather &
+    python intervals_hybrid_to_supabase.py --athlete "Kevin Robertson" --oldest 2021-01-01 --newest 2024-12-31 --wellness-oldest 2021-01-01 --wellness-newest 2024-12-31 --skip-weather &
+    # ... repeat for all athletes (up to 12-15 parallel processes)
+    wait  # Wait for all to complete
+
+    # Weather backfill only (check forecast → archive updates)
+    python intervals_hybrid_to_supabase.py --backfill-only
+
+Features:
+- Duplicate prevention: Skips already-imported activities
+- Batch retry: Exponential backoff for failed inserts
+- Weather cascade: Archive → Forecast → NULL (never blocks)
+- HR fallback: Metadata → Streams → Calculate from records
+- Wellness UPSERT: Safe to run multiple times
+- Skip weather: --skip-weather flag for bulk import (no API rate limits)
 """
 
 import os
@@ -13,7 +37,7 @@ import sys
 import json
 import argparse
 import time
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 import requests
 from requests.auth import HTTPBasicAuth
@@ -93,24 +117,29 @@ stats = {
     'records_inserted': 0,
     'metadata_inserted': 0,
     'intervals_inserted': 0,
-    
+
     # NEW: Data completeness tracking
     'outdoor_activities': 0,  # Activities with GPS
     'weather_complete': 0,    # Weather data present
     'weather_from_archive': 0,
     'weather_from_forecast': 0,
     'weather_missing': 0,     # No weather after all retries
-    
+
     'hr_monitor_used': 0,     # Activities with HR records
     'hr_complete': 0,         # avg_hr present
     'hr_missing': 0,          # No avg_hr despite HR monitor
-    
+
     # NEW: Retry tracking
     'retries': {
         'weather_archive': 0,
         'weather_forecast': 0,
     },
-    
+
+    # NEW: Bulk import tracking (Phase 2 Pre-Import Audit)
+    'activities_skipped': 0,      # Already imported (duplicate prevention)
+    'batch_failures': 0,          # Failed record batch inserts
+    'wellness_days_imported': 0,  # Days of wellness data imported
+
     # Enhanced error tracking
     'errors': [],  # List of error messages
     'error_details': []  # List of dicts with full context
@@ -723,7 +752,7 @@ def retry_with_exponential_backoff(
 
 def download_fit_file_with_retry(athlete: dict, activity_id: str) -> Tuple[Optional[bytes], Optional[str]]:
     """Download FIT file with retry logic"""
-    
+
     def _download():
         response = requests.get(
             f"{BASE_URL}/activity/{activity_id}/file",
@@ -733,9 +762,42 @@ def download_fit_file_with_retry(athlete: dict, activity_id: str) -> Tuple[Optio
         )
         response.raise_for_status()
         return response.content
-    
+
     content, error = retry_with_exponential_backoff(_download, max_retries=3)
     return content, error
+
+
+def get_existing_activity_ids(athlete_id: str) -> set:
+    """
+    Get set of activity_ids already in database for this athlete.
+    Used for duplicate prevention during bulk import.
+
+    Args:
+        athlete_id: The athlete's Intervals.icu ID
+
+    Returns:
+        Set of activity_id strings already in database
+    """
+    url = f"{SUPABASE_URL}/rest/v1/activity_metadata"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}"
+    }
+    params = {
+        "select": "activity_id",
+        "athlete_id": f"eq.{athlete_id}"
+    }
+
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=30)
+        if response.status_code == 200:
+            return set(row['activity_id'] for row in response.json())
+        else:
+            log(f"  Warning: Could not fetch existing activity_ids: {response.status_code}", "WARNING")
+            return set()
+    except Exception as e:
+        log(f"  Warning: Error fetching existing activity_ids: {e}", "WARNING")
+        return set()
 
 def load_athletes(athlete_filter: Optional[str] = None) -> List[Dict]:
     """Charger les athlètes"""
@@ -1138,6 +1200,51 @@ def download_and_parse_fit(athlete: Dict, activity_id: str, athlete_id: str) -> 
         log(f"  Erreur FIT: {str(e)[:100]}", "WARNING")
         return None, None, False
 
+def insert_records_batch_with_retry(records_url: str, headers: dict, batch: List[Dict], max_retries: int = 3) -> Tuple[bool, Optional[str]]:
+    """
+    Insert a batch of records with retry logic.
+
+    Args:
+        records_url: Supabase REST API URL for records table
+        headers: Request headers with auth
+        batch: List of record dicts to insert
+        max_retries: Number of retry attempts
+
+    Returns:
+        (success, error_message)
+    """
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(records_url, headers=headers, json=batch, timeout=60)
+            if response.status_code in [200, 201]:
+                return True, None
+
+            error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
+
+            # Don't retry on client errors (4xx) except 429 (rate limit)
+            if 400 <= response.status_code < 500 and response.status_code != 429:
+                return False, error_msg
+
+            # Rate limit - wait longer
+            if response.status_code == 429:
+                if attempt < max_retries - 1:
+                    log(f"    Rate limited, waiting 5s...", "WARNING")
+                    time.sleep(5)
+                continue
+
+        except requests.exceptions.Timeout as e:
+            error_msg = f"Timeout: {str(e)}"
+        except requests.exceptions.RequestException as e:
+            error_msg = f"Request error: {str(e)}"
+
+        if attempt < max_retries - 1:
+            delay = (2 ** attempt)  # 1s, 2s, 4s
+            log(f"    Batch insert failed (attempt {attempt+1}), retrying in {delay}s...", "WARNING")
+            time.sleep(delay)
+
+    return False, error_msg
+
+
 def normalize_records(records: List[Dict]) -> List[Dict]:
     """Normaliser les records pour que tous aient les mêmes clés (fix PGRST102)"""
     if not records:
@@ -1175,7 +1282,7 @@ def normalize_records(records: List[Dict]) -> List[Dict]:
 def insert_to_supabase(records: List[Dict], metadata: Dict, intervals: List[Dict] = None, dry_run: bool = False):
     """Insérer dans Supabase"""
     if dry_run:
-        log(f"  [DRY-RUN] Insertion de {len(records)} records + metadata + {len(intervals or [])} intervals")
+        log(f"  [DRY-RUN] Insertion de {len(records)} records + metadata + {len(intervals or [])} intervals + zone time calc")
         return True
     
     try:
@@ -1203,25 +1310,22 @@ def insert_to_supabase(records: List[Dict], metadata: Dict, intervals: List[Dict
         
         stats['metadata_inserted'] += 1
         
-        # Records par batches
+        # Records par batches (with retry logic)
         total_inserted = 0
+        records_url = f"{SUPABASE_URL}/rest/v1/activity"
+        total_batches = (len(records) + BATCH_SIZE - 1) // BATCH_SIZE if records else 0
+
         for i in range(0, len(records), BATCH_SIZE):
             batch = records[i:i + BATCH_SIZE]
-            
-            records_url = f"{SUPABASE_URL}/rest/v1/activity"
-            records_response = requests.post(records_url, headers=headers, json=batch, timeout=60)
-            
-            if records_response.status_code not in [200, 201]:
-                error_msg = f"Batch {i//BATCH_SIZE + 1}: {records_response.status_code}"
-                try:
-                    error_detail = records_response.json()
-                    log(f"  {error_msg} - {error_detail}", "ERROR")
-                except:
-                    log(f"  {error_msg} - {records_response.text[:200]}", "ERROR")
-                continue
-            
-            total_inserted += len(batch)
-        
+            batch_num = i // BATCH_SIZE + 1
+
+            success, error = insert_records_batch_with_retry(records_url, headers, batch)
+            if not success:
+                log(f"    Batch {batch_num}/{total_batches} FAILED after retries: {error}", "ERROR")
+                stats['batch_failures'] += 1
+            else:
+                total_inserted += len(batch)
+
         stats['records_inserted'] += total_inserted
         
         # Intervals
@@ -1241,14 +1345,152 @@ def insert_to_supabase(records: List[Dict], metadata: Dict, intervals: List[Dict
                 log(f"  Inséré {total_inserted} records + metadata (sans intervals)", "SUCCESS")
         else:
             log(f"  Inséré {total_inserted} records + metadata", "SUCCESS")
-        
+
+        # Calculate zone time for this activity (incremental calculation)
+        # Only for activities with GPS records (running activities)
+        if records and len(records) > 0:
+            calculate_zone_time_for_activity(metadata['activity_id'])
+
+            # Calculate monotony/strain for the affected week
+            if 'date' in metadata and 'athlete_id' in metadata:
+                week_start = get_week_start(metadata['date'])
+                calculate_monotony_strain_for_week(metadata['athlete_id'], week_start)
+
         return True
         
     except Exception as e:
         log(f"  Erreur Supabase: {e}", "ERROR")
         return False
 
-def process_activity(athlete: Dict, activity: Dict, dry_run: bool = False):
+
+def calculate_zone_time_for_activity(activity_id: str, dry_run: bool = False) -> bool:
+    """
+    Calculate and store zone time for a single activity via SQL function.
+
+    Calls the SQL function calculate_zone_time_for_activity() which:
+    1. Gets zones effective on the activity date (temporal matching)
+    2. Calculates pace from GPS speed data
+    3. Counts seconds in each zone
+    4. Upserts result into activity_zone_time table
+
+    Args:
+        activity_id: The activity to calculate zone time for
+        dry_run: If True, skip the actual calculation
+
+    Returns:
+        True if successful, False otherwise
+    """
+    if dry_run:
+        log(f"  [DRY-RUN] Would calculate zone time for {activity_id}")
+        return True
+
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/rpc/calculate_zone_time_for_activity"
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        response = requests.post(
+            url,
+            headers=headers,
+            json={"p_activity_id": activity_id},
+            timeout=30
+        )
+
+        if response.status_code in (200, 204):
+            result = response.json()
+            if result and len(result) > 0:
+                was_inserted = result[0].get('was_inserted', False)
+                if was_inserted:
+                    total_mins = result[0].get('total_zone_minutes', 0)
+                    if total_mins and float(total_mins) > 0:
+                        log(f"  Zone time: {float(total_mins):.1f} min", "SUCCESS")
+            return True
+        else:
+            log(f"  Zone time calculation failed: {response.status_code}", "WARNING")
+            return False
+
+    except Exception as e:
+        log(f"  Zone time calculation error: {e}", "WARNING")
+        return False
+
+
+def calculate_monotony_strain_for_week(athlete_id: str, week_start: date, dry_run: bool = False) -> bool:
+    """
+    Calculate and store weekly monotony/strain via SQL function.
+
+    Calls the SQL function calculate_monotony_strain_for_week() which:
+    1. Queries activity_zone_time for the week
+    2. Calculates CV, monotony, strain per zone
+    3. Upserts result into weekly_monotony_strain table
+
+    Args:
+        athlete_id: The athlete ID
+        week_start: Monday of the week to calculate
+        dry_run: If True, skip the actual calculation
+
+    Returns:
+        True if successful, False otherwise
+    """
+    if dry_run:
+        log(f"  [DRY-RUN] Would calculate monotony/strain for {athlete_id} week {week_start}")
+        return True
+
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/rpc/calculate_monotony_strain_for_week"
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        response = requests.post(
+            url,
+            headers=headers,
+            json={
+                "p_athlete_id": athlete_id,
+                "p_week_start": week_start.isoformat()
+            },
+            timeout=30
+        )
+
+        if response.status_code in (200, 204):
+            result = response.json()
+            if result and len(result) > 0:
+                total_strain = result[0].get('total_strain', 0)
+                total_monotony = result[0].get('total_monotony', 0)
+                if total_strain and float(total_strain) > 0:
+                    log(f"  Monotony/Strain: strain={float(total_strain):.0f}, monotony={float(total_monotony):.2f}", "SUCCESS")
+            return True
+        else:
+            log(f"  Monotony/strain calculation failed: {response.status_code}", "WARNING")
+            return False
+
+    except Exception as e:
+        log(f"  Monotony/strain calculation error: {e}", "WARNING")
+        return False
+
+
+def get_week_start(activity_date_str: str) -> date:
+    """
+    Get the Monday (week start) for a given activity date.
+
+    Args:
+        activity_date_str: Date string in YYYY-MM-DD format
+
+    Returns:
+        The Monday of that week as a date object
+    """
+    activity_date = datetime.strptime(activity_date_str, "%Y-%m-%d").date()
+    # weekday(): Monday=0, Sunday=6
+    days_since_monday = activity_date.weekday()
+    week_start = activity_date - timedelta(days=days_since_monday)
+    return week_start
+
+
+def process_activity(athlete: Dict, activity: Dict, dry_run: bool = False, skip_weather: bool = False):
     """Traiter une activité avec stratégie hybride"""
     activity_id = activity.get('id')
     activity_type = activity.get('type')
@@ -1310,68 +1552,71 @@ def process_activity(athlete: Dict, activity: Dict, dry_run: bool = False):
         })
         
         # Enrichir avec météo si position disponible (Phase 1: Best Effort)
+        # Skip weather if --skip-weather flag is set (bulk import optimization)
         if metadata.get('start_lat') and metadata.get('start_lon') and metadata.get('start_time'):
-            log(f"  → Fetching weather (archive/forecast)...")
-            weather, weather_source, weather_error = get_weather_best_effort(
-                metadata['start_lat'], metadata['start_lon'], metadata['start_time']
-            )
-            air = fetch_air_quality_archive(metadata['start_lat'], metadata['start_lon'], metadata['start_time'])
-            
-            # Track outdoor activity
             stats['outdoor_activities'] += 1
-            
-            # Add weather source tracking
-            metadata['weather_source'] = weather_source  # 'archive', 'forecast', or NULL
-            
-            if weather:
-                # Weather available - add all fields
-                if weather.get('temperature_2m') is not None:
-                    metadata['weather_temp_c'] = weather['temperature_2m']
-                if weather.get('relative_humidity_2m') is not None:
-                    metadata['weather_humidity_pct'] = int(weather['relative_humidity_2m'])
-                if weather.get('dew_point_2m') is not None:
-                    metadata['weather_dew_point_c'] = weather['dew_point_2m']
-                if weather.get('wind_speed_10m') is not None:
-                    metadata['weather_wind_speed_ms'] = weather['wind_speed_10m']
-                if weather.get('wind_gusts_10m') is not None:
-                    metadata['weather_wind_gust_ms'] = weather['wind_gusts_10m']
-                if weather.get('wind_direction_10m') is not None:
-                    metadata['weather_wind_dir_deg'] = int(weather['wind_direction_10m'])
-                if weather.get('pressure_msl') is not None:
-                    metadata['weather_pressure_hpa'] = weather['pressure_msl']
-                if weather.get('cloudcover') is not None:
-                    metadata['weather_cloudcover_pct'] = int(weather['cloudcover'])
-                if weather.get('precipitation') is not None:
-                    metadata['weather_precip_mm'] = weather['precipitation']
-                
-                # Track weather success
-                stats['weather_complete'] += 1
-                if weather_source == 'archive':
-                    stats['weather_from_archive'] += 1
-                elif weather_source == 'forecast':
-                    stats['weather_from_forecast'] += 1
-                    log(f"   Using forecast weather (archive unavailable)", "WARNING")
+
+            if skip_weather:
+                log(f"  → Skipping weather (--skip-weather flag)")
             else:
-                # Weather completely unavailable - flag but CONTINUE
-                metadata['weather_error'] = weather_error
-                log(f"  Weather unavailable: {weather_error}", "ERROR")
-                stats['weather_missing'] += 1
-            
-            # Ajouter les données de qualité de l'air
-            if air.get('pm2_5') is not None:
-                metadata['air_pm2_5'] = air['pm2_5']
-            if air.get('pm10') is not None:
-                metadata['air_pm10'] = air['pm10']
-            if air.get('ozone') is not None:
-                metadata['air_ozone'] = air['ozone']
-            if air.get('nitrogen_dioxide') is not None:
-                metadata['air_no2'] = air['nitrogen_dioxide']
-            if air.get('sulphur_dioxide') is not None:
-                metadata['air_so2'] = air['sulphur_dioxide']
-            if air.get('carbon_monoxide') is not None:
-                metadata['air_co'] = air['carbon_monoxide']
-            if air.get('us_aqi') is not None:
-                metadata['air_us_aqi'] = int(air['us_aqi'])
+                log(f"  → Fetching weather (archive/forecast)...")
+                weather, weather_source, weather_error = get_weather_best_effort(
+                    metadata['start_lat'], metadata['start_lon'], metadata['start_time']
+                )
+                air = fetch_air_quality_archive(metadata['start_lat'], metadata['start_lon'], metadata['start_time'])
+
+                # Add weather source tracking
+                metadata['weather_source'] = weather_source  # 'archive', 'forecast', or NULL
+
+                if weather:
+                    # Weather available - add all fields
+                    if weather.get('temperature_2m') is not None:
+                        metadata['weather_temp_c'] = weather['temperature_2m']
+                    if weather.get('relative_humidity_2m') is not None:
+                        metadata['weather_humidity_pct'] = int(weather['relative_humidity_2m'])
+                    if weather.get('dew_point_2m') is not None:
+                        metadata['weather_dew_point_c'] = weather['dew_point_2m']
+                    if weather.get('wind_speed_10m') is not None:
+                        metadata['weather_wind_speed_ms'] = weather['wind_speed_10m']
+                    if weather.get('wind_gusts_10m') is not None:
+                        metadata['weather_wind_gust_ms'] = weather['wind_gusts_10m']
+                    if weather.get('wind_direction_10m') is not None:
+                        metadata['weather_wind_dir_deg'] = int(weather['wind_direction_10m'])
+                    if weather.get('pressure_msl') is not None:
+                        metadata['weather_pressure_hpa'] = weather['pressure_msl']
+                    if weather.get('cloudcover') is not None:
+                        metadata['weather_cloudcover_pct'] = int(weather['cloudcover'])
+                    if weather.get('precipitation') is not None:
+                        metadata['weather_precip_mm'] = weather['precipitation']
+
+                    # Track weather success
+                    stats['weather_complete'] += 1
+                    if weather_source == 'archive':
+                        stats['weather_from_archive'] += 1
+                    elif weather_source == 'forecast':
+                        stats['weather_from_forecast'] += 1
+                        log(f"   Using forecast weather (archive unavailable)", "WARNING")
+                else:
+                    # Weather completely unavailable - flag but CONTINUE
+                    metadata['weather_error'] = weather_error
+                    log(f"  Weather unavailable: {weather_error}", "ERROR")
+                    stats['weather_missing'] += 1
+
+                # Ajouter les données de qualité de l'air
+                if air.get('pm2_5') is not None:
+                    metadata['air_pm2_5'] = air['pm2_5']
+                if air.get('pm10') is not None:
+                    metadata['air_pm10'] = air['pm10']
+                if air.get('ozone') is not None:
+                    metadata['air_ozone'] = air['ozone']
+                if air.get('nitrogen_dioxide') is not None:
+                    metadata['air_no2'] = air['nitrogen_dioxide']
+                if air.get('sulphur_dioxide') is not None:
+                    metadata['air_so2'] = air['sulphur_dioxide']
+                if air.get('carbon_monoxide') is not None:
+                    metadata['air_co'] = air['carbon_monoxide']
+                if air.get('us_aqi') is not None:
+                    metadata['air_us_aqi'] = int(air['us_aqi'])
         
         # Récupérer les intervals
         intervals = get_intervals(athlete, activity_id)
@@ -1448,70 +1693,74 @@ def process_activity(athlete: Dict, activity: Dict, dry_run: bool = False):
             pass
     
     # Enrichir avec météo si position disponible (Phase 1: Best Effort)
+    # Skip weather if --skip-weather flag is set (bulk import optimization)
     if start_lat and start_lon and start_time:
-        log(f"  → Fetching weather (archive/forecast)...")
-        weather, weather_source, weather_error = get_weather_best_effort(
-            start_lat, start_lon, start_time
-        )
-        air = fetch_air_quality_archive(start_lat, start_lon, start_time)
-        
         # Always add GPS coordinates
         metadata['start_lat'] = start_lat
         metadata['start_lon'] = start_lon
         stats['outdoor_activities'] += 1
-        
-        # Add weather source tracking
-        metadata['weather_source'] = weather_source  # 'archive', 'forecast', or NULL
-        
-        if weather:
-            # Weather available - add all fields
-            if weather.get('temperature_2m') is not None:
-                metadata['weather_temp_c'] = weather['temperature_2m']
-            if weather.get('relative_humidity_2m') is not None:
-                metadata['weather_humidity_pct'] = int(weather['relative_humidity_2m'])
-            if weather.get('dew_point_2m') is not None:
-                metadata['weather_dew_point_c'] = weather['dew_point_2m']
-            if weather.get('wind_speed_10m') is not None:
-                metadata['weather_wind_speed_ms'] = weather['wind_speed_10m']
-            if weather.get('wind_gusts_10m') is not None:
-                metadata['weather_wind_gust_ms'] = weather['wind_gusts_10m']
-            if weather.get('wind_direction_10m') is not None:
-                metadata['weather_wind_dir_deg'] = int(weather['wind_direction_10m'])
-            if weather.get('pressure_msl') is not None:
-                metadata['weather_pressure_hpa'] = weather['pressure_msl']
-            if weather.get('cloudcover') is not None:
-                metadata['weather_cloudcover_pct'] = int(weather['cloudcover'])
-            if weather.get('precipitation') is not None:
-                metadata['weather_precip_mm'] = weather['precipitation']
-            
-            # Track weather success
-            stats['weather_complete'] += 1
-            if weather_source == 'archive':
-                stats['weather_from_archive'] += 1
-            elif weather_source == 'forecast':
-                stats['weather_from_forecast'] += 1
-                log(f"   Using forecast weather (archive unavailable)", "WARNING")
+
+        if skip_weather:
+            log(f"  → Skipping weather (--skip-weather flag)")
         else:
-            # Weather completely unavailable - flag but CONTINUE
-            metadata['weather_error'] = weather_error
-            log(f"  Weather unavailable: {weather_error}", "ERROR")
-            stats['weather_missing'] += 1
-        
-        # Ajouter les données de qualité de l'air
-        if air.get('pm2_5') is not None:
-            metadata['air_pm2_5'] = air['pm2_5']
-        if air.get('pm10') is not None:
-            metadata['air_pm10'] = air['pm10']
-        if air.get('ozone') is not None:
-            metadata['air_ozone'] = air['ozone']
-        if air.get('nitrogen_dioxide') is not None:
-            metadata['air_no2'] = air['nitrogen_dioxide']
-        if air.get('sulphur_dioxide') is not None:
-            metadata['air_so2'] = air['sulphur_dioxide']
-        if air.get('carbon_monoxide') is not None:
-            metadata['air_co'] = air['carbon_monoxide']
-        if air.get('us_aqi') is not None:
-            metadata['air_us_aqi'] = int(air['us_aqi'])
+            log(f"  → Fetching weather (archive/forecast)...")
+            weather, weather_source, weather_error = get_weather_best_effort(
+                start_lat, start_lon, start_time
+            )
+            air = fetch_air_quality_archive(start_lat, start_lon, start_time)
+
+            # Add weather source tracking
+            metadata['weather_source'] = weather_source  # 'archive', 'forecast', or NULL
+
+            if weather:
+                # Weather available - add all fields
+                if weather.get('temperature_2m') is not None:
+                    metadata['weather_temp_c'] = weather['temperature_2m']
+                if weather.get('relative_humidity_2m') is not None:
+                    metadata['weather_humidity_pct'] = int(weather['relative_humidity_2m'])
+                if weather.get('dew_point_2m') is not None:
+                    metadata['weather_dew_point_c'] = weather['dew_point_2m']
+                if weather.get('wind_speed_10m') is not None:
+                    metadata['weather_wind_speed_ms'] = weather['wind_speed_10m']
+                if weather.get('wind_gusts_10m') is not None:
+                    metadata['weather_wind_gust_ms'] = weather['wind_gusts_10m']
+                if weather.get('wind_direction_10m') is not None:
+                    metadata['weather_wind_dir_deg'] = int(weather['wind_direction_10m'])
+                if weather.get('pressure_msl') is not None:
+                    metadata['weather_pressure_hpa'] = weather['pressure_msl']
+                if weather.get('cloudcover') is not None:
+                    metadata['weather_cloudcover_pct'] = int(weather['cloudcover'])
+                if weather.get('precipitation') is not None:
+                    metadata['weather_precip_mm'] = weather['precipitation']
+
+                # Track weather success
+                stats['weather_complete'] += 1
+                if weather_source == 'archive':
+                    stats['weather_from_archive'] += 1
+                elif weather_source == 'forecast':
+                    stats['weather_from_forecast'] += 1
+                    log(f"   Using forecast weather (archive unavailable)", "WARNING")
+            else:
+                # Weather completely unavailable - flag but CONTINUE
+                metadata['weather_error'] = weather_error
+                log(f"  Weather unavailable: {weather_error}", "ERROR")
+                stats['weather_missing'] += 1
+
+            # Ajouter les données de qualité de l'air
+            if air.get('pm2_5') is not None:
+                metadata['air_pm2_5'] = air['pm2_5']
+            if air.get('pm10') is not None:
+                metadata['air_pm10'] = air['pm10']
+            if air.get('ozone') is not None:
+                metadata['air_ozone'] = air['ozone']
+            if air.get('nitrogen_dioxide') is not None:
+                metadata['air_no2'] = air['nitrogen_dioxide']
+            if air.get('sulphur_dioxide') is not None:
+                metadata['air_so2'] = air['sulphur_dioxide']
+            if air.get('carbon_monoxide') is not None:
+                metadata['air_co'] = air['carbon_monoxide']
+            if air.get('us_aqi') is not None:
+                metadata['air_us_aqi'] = int(air['us_aqi'])
     
     # Phase 1: Enhanced HR fallback for streams path
     # Check if we have HR data in records to track HR monitor usage
@@ -1539,28 +1788,41 @@ def process_activity(athlete: Dict, activity: Dict, dry_run: bool = False):
     
     return success
 
-def process_athlete(athlete: Dict, oldest: str, newest: str, dry_run: bool = False):
+def process_athlete(athlete: Dict, oldest: str, newest: str, dry_run: bool = False, skip_weather: bool = False):
     """Traiter un athlète"""
     name = athlete['name']
     athlete_id = athlete['id']
-    
+
     log(f"\n{'='*70}")
     log(f"{name} ({athlete_id})")
     log(f"{'='*70}")
-    
+
     activities = get_activities(athlete, oldest, newest)
-    
+
     if not activities:
         log(f"Aucune activité de course trouvée", "WARNING")
         return
-    
+
     stats['activities_found'] += len(activities)
-    log(f"{len(activities)} activités de course trouvées", "SUCCESS")
-    
+    log(f"{len(activities)} activités trouvées", "SUCCESS")
+
+    # Fetch existing activity_ids to prevent duplicates
+    existing_ids = get_existing_activity_ids(athlete_id)
+    if existing_ids:
+        log(f"  {len(existing_ids)} activités déjà importées (seront ignorées)")
+
     for i, activity in enumerate(activities, 1):
+        activity_id = activity.get('id')
+
+        # Skip if already imported (duplicate prevention)
+        if activity_id in existing_ids:
+            log(f"\n[{i}/{len(activities)}] {activity_id} → déjà importé, ignoré")
+            stats['activities_skipped'] += 1
+            continue
+
         log(f"\n[{i}/{len(activities)}]")
-        process_activity(athlete, activity, dry_run)
-    
+        process_activity(athlete, activity, dry_run, skip_weather)
+
     stats['athletes_processed'] += 1
 
 # =============================================================================
@@ -1711,22 +1973,85 @@ def import_wellness_for_date(athletes: List[Dict], target_date: str, dry_run: bo
     log(f"  Athletes with wellness: {wellness_success}/{len(athletes)}")
     log(f"  Records processed: {wellness_count}")
 
+    return wellness_count
+
+
+def import_wellness_date_range(athletes: List[Dict], oldest_date: str, newest_date: str, dry_run: bool = False):
+    """
+    Import wellness data for a date range (for bulk historical import).
+
+    Args:
+        athletes: List of athlete dicts
+        oldest_date: Start date (YYYY-MM-DD)
+        newest_date: End date (YYYY-MM-DD)
+        dry_run: If True, don't actually insert
+
+    Uses UPSERT - safe to run multiple times (idempotent).
+    """
+    from datetime import timedelta
+
+    log(f"\n{Colors.CYAN}{'='*70}{Colors.END}")
+    log(f"{Colors.CYAN}{Colors.BOLD}HISTORICAL WELLNESS IMPORT: {oldest_date} → {newest_date}{Colors.END}")
+    log(f"{Colors.CYAN}{'='*70}{Colors.END}")
+
+    start = datetime.strptime(oldest_date, "%Y-%m-%d")
+    end = datetime.strptime(newest_date, "%Y-%m-%d")
+
+    total_days = (end - start).days + 1
+    total_records = 0
+    days_with_data = 0
+
+    current = start
+    day_num = 0
+    while current <= end:
+        day_num += 1
+        date_str = current.strftime("%Y-%m-%d")
+
+        # Progress indicator every 30 days
+        if day_num % 30 == 1 or day_num == total_days:
+            log(f"\n  Processing day {day_num}/{total_days}: {date_str}")
+
+        day_records = 0
+        for athlete in athletes:
+            wellness_data = get_wellness_data(athlete, date_str)
+            if wellness_data:
+                records = [transform_wellness_record(r, athlete['id']) for r in wellness_data]
+                if insert_wellness_to_supabase(records, dry_run):
+                    day_records += len(records)
+
+        if day_records > 0:
+            days_with_data += 1
+            total_records += day_records
+
+        current += timedelta(days=1)
+
+    stats['wellness_days_imported'] = days_with_data
+
+    log(f"\n{Colors.BOLD}Historical Wellness Summary:{Colors.END}")
+    log(f"  Date range: {oldest_date} → {newest_date} ({total_days} days)")
+    log(f"  Days with wellness data: {days_with_data}")
+    log(f"  Total records imported: {total_records}")
+
 
 def print_summary():
     """Résumé final (Phase 1 Enhanced)"""
     print(f"\n{Colors.BLUE}{'='*70}{Colors.END}")
     print(f"{Colors.BOLD}RÉSUMÉ FINAL{Colors.END}")
     print(f"{Colors.BLUE}{'='*70}{Colors.END}\n")
-    
+
     print(f"Athlètes traités: {stats['athletes_processed']}")
     print(f"Activités trouvées: {stats['activities_found']}")
     print(f"Activités traitées: {stats['activities_processed']}")
-    
+
+    # Show skipped activities if any
+    if stats['activities_skipped'] > 0:
+        print(f"Activités ignorées (déjà importées): {stats['activities_skipped']}")
+
     print(f"\nSources:")
     print(f"  FIT réussi: {stats['fit_success']} ({stats['fit_success']/max(stats['activities_found'],1)*100:.1f}%)")
     print(f"  Fallback streams: {stats['stream_fallback']} ({stats['stream_fallback']/max(stats['activities_found'],1)*100:.1f}%)")
     print(f"  Échecs: {stats['fit_failed']}")
-    
+
     # Phase 1: Weather completeness
     if stats['outdoor_activities'] > 0:
         weather_pct = stats['weather_complete'] / stats['outdoor_activities'] * 100
@@ -1739,8 +2064,8 @@ def print_summary():
             print(f"  {Colors.RED}Sans météo: {stats['weather_missing']}{Colors.END}")
         else:
             print(f"  Sans météo: 0")
-    
-    # Phase 1: HR completeness  
+
+    # Phase 1: HR completeness
     if stats['hr_monitor_used'] > 0:
         hr_pct = stats['hr_complete'] / stats['hr_monitor_used'] * 100
         print(f"\nFréquence cardiaque:")
@@ -1748,12 +2073,21 @@ def print_summary():
         print(f"  HR complète: {stats['hr_complete']} ({hr_pct:.1f}%)")
         if stats['hr_missing'] > 0:
             print(f"  {Colors.YELLOW}HR manquante: {stats['hr_missing']}{Colors.END}")
-    
+
     print(f"\nDonnées insérées:")
     print(f"  Records: {stats['records_inserted']:,}")
     print(f"  Métadonnées: {stats['metadata_inserted']}")
     print(f"  Intervals: {stats['intervals_inserted']}")
-    
+
+    # Show batch failures if any
+    if stats['batch_failures'] > 0:
+        print(f"  {Colors.RED}Batch failures: {stats['batch_failures']}{Colors.END}")
+
+    # Show wellness days if imported
+    if stats['wellness_days_imported'] > 0:
+        print(f"\nWellness:")
+        print(f"  Days imported: {stats['wellness_days_imported']}")
+
     if stats['errors']:
         print(f"\n{Colors.RED}Erreurs ({len(stats['errors'])}):{Colors.END}")
         for error in stats['errors'][:10]:
@@ -1773,6 +2107,14 @@ def main():
                         help="Start backfill this many days back (default: 3)")
     parser.add_argument('--backfill-max-days', type=int, default=7,
                         help="Stop backfill after this many days back (default: 7)")
+    # Wellness historical import options
+    parser.add_argument('--wellness-oldest', type=str,
+                        help="Oldest date for historical wellness import (YYYY-MM-DD)")
+    parser.add_argument('--wellness-newest', type=str,
+                        help="Newest date for historical wellness import (YYYY-MM-DD)")
+    # Bulk import optimization
+    parser.add_argument('--skip-weather', action='store_true',
+                        help="Skip weather/air quality API calls (for bulk historical import)")
 
     args = parser.parse_args()
 
@@ -1797,6 +2139,8 @@ def main():
     print(f"Période: {args.oldest} → {args.newest}")
     print(f"Stratégie: FIT (priorité) + Streams (fallback)")
     print(f"Supabase: {SUPABASE_URL}")
+    if args.skip_weather:
+        print(f"{Colors.YELLOW}⚡ Weather: SKIPPED (bulk import mode){Colors.END}")
     if args.backfill_weather:
         print(f"{Colors.BLUE}Weather backfill: Enabled (3-7 days back){Colors.END}")
     print("")
@@ -1806,7 +2150,7 @@ def main():
         return 1
 
     for athlete in athletes:
-        process_athlete(athlete, args.oldest, args.newest, args.dry_run)
+        process_athlete(athlete, args.oldest, args.newest, args.dry_run, args.skip_weather)
 
     print_summary()
 
@@ -1818,14 +2162,20 @@ def main():
             dry_run=False
         )
 
-    # Import today's wellness for ALL athletes (regardless of activities)
-    today = datetime.now().strftime("%Y-%m-%d")
-    import_wellness_for_date(athletes, today, args.dry_run)
+    # Import wellness data
+    # If historical dates provided, import date range; otherwise import today only
+    if args.wellness_oldest and args.wellness_newest:
+        import_wellness_date_range(athletes, args.wellness_oldest, args.wellness_newest, args.dry_run)
+    else:
+        # Import today's wellness for ALL athletes (regardless of activities)
+        today = datetime.now().strftime("%Y-%m-%d")
+        import_wellness_for_date(athletes, today, args.dry_run)
 
-    # Phase 2: Refresh materialized view after data import
+    # Phase 2: Refresh materialized views after data import
     if not args.dry_run and stats['activities_processed'] > 0:
+        # Refresh activity summary view
         try:
-            print(f"\n{Colors.BLUE}Refreshing materialized view...{Colors.END}")
+            print(f"\n{Colors.BLUE}Refreshing activity summary view...{Colors.END}")
             refresh_url = f"{SUPABASE_URL}/rest/v1/rpc/refresh_activity_summary"
             response = requests.post(
                 refresh_url,
@@ -1837,12 +2187,32 @@ def main():
                 timeout=60
             )
             if response.status_code in (200, 204):
-                print(f"{Colors.GREEN}Materialized view refreshed{Colors.END}\n")
+                print(f"{Colors.GREEN}Activity summary view refreshed{Colors.END}")
             else:
-                print(f"{Colors.YELLOW} View refresh returned status {response.status_code}{Colors.END}\n")
+                print(f"{Colors.YELLOW} View refresh returned status {response.status_code}{Colors.END}")
         except Exception as e:
-            print(f"{Colors.YELLOW} Could not refresh view: {e}{Colors.END}\n")
-    
+            print(f"{Colors.YELLOW} Could not refresh activity summary view: {e}{Colors.END}")
+
+        # Refresh zone time views (activity_zone_time + weekly_zone_time)
+        try:
+            print(f"{Colors.BLUE}Refreshing zone time views...{Colors.END}")
+            refresh_url = f"{SUPABASE_URL}/rest/v1/rpc/refresh_all_zone_views"
+            response = requests.post(
+                refresh_url,
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json"
+                },
+                timeout=300  # Zone views may take longer (processing 2.5M+ rows)
+            )
+            if response.status_code in (200, 204):
+                print(f"{Colors.GREEN}Zone time views refreshed{Colors.END}\n")
+            else:
+                print(f"{Colors.YELLOW} Zone view refresh returned status {response.status_code}{Colors.END}\n")
+        except Exception as e:
+            print(f"{Colors.YELLOW} Could not refresh zone views: {e}{Colors.END}\n")
+
     return 0 if stats['activities_processed'] > 0 else 1
 
 if __name__ == "__main__":

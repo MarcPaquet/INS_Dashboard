@@ -6,15 +6,23 @@
 -- Team: Saint-Laurent Sélect Running Club
 -- Database: PostgreSQL via Supabase
 -- Target Project: vqcqqfddgnvhcrxcaxjf
+-- Last Updated: December 23, 2025
 --
 -- This file contains the complete database schema for deploying to a new
 -- Supabase account. It includes:
---   - Core tables (Phase 1)
---   - Feature tables (Phase 2)
+--   - Core tables (Phase 1): athlete, users, activity_metadata, activity,
+--     activity_intervals, wellness
+--   - Feature tables (Phase 2): personal_records, personal_records_history,
+--     athlete_training_zones, daily_workout_surveys, weekly_wellness_surveys,
+--     lactate_tests, activity_zone_time, weekly_monotony_strain
+--   - Materialized views: activity_pace_zones, weekly_zone_time
 --   - All indexes and constraints
 --   - RLS policies
---   - Functions and triggers
---   - Materialized views
+--   - Functions: zone time calculation, monotony/strain calculation,
+--     personal records archiving, zone lookup
+--   - Triggers for auto-recalculation
+--
+-- Tables: 14 | Materialized Views: 2 | Functions: 10+
 --
 -- Deployment: Run this entire file in Supabase SQL Editor
 -- Estimated execution time: 30-60 seconds
@@ -721,7 +729,569 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- ============================================================================
--- SECTION 9: FINAL SETUP
+-- SECTION 8B: LACTATE TESTS TABLE
+-- ============================================================================
+-- Manual data entry for lactate test results
+
+CREATE TABLE IF NOT EXISTS lactate_tests (
+    id SERIAL PRIMARY KEY,
+    athlete_id TEXT NOT NULL,
+    test_date DATE NOT NULL,
+    distance_m INTEGER NOT NULL CHECK (distance_m > 0 AND distance_m <= 50000),
+    lactate_mmol DECIMAL(4,2) NOT NULL CHECK (lactate_mmol >= 0 AND lactate_mmol <= 30),
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+
+    CONSTRAINT fk_lactate_athlete FOREIGN KEY (athlete_id) REFERENCES athlete(athlete_id) ON DELETE CASCADE,
+    CONSTRAINT unique_lactate_test UNIQUE(athlete_id, test_date, distance_m)
+);
+
+CREATE INDEX idx_lactate_athlete_date ON lactate_tests(athlete_id, test_date DESC);
+
+ALTER TABLE lactate_tests ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow all access to lactate_tests"
+    ON lactate_tests
+    FOR ALL
+    USING (true);
+
+COMMENT ON TABLE lactate_tests IS 'Manual lactate test results entered by athletes.';
+COMMENT ON COLUMN lactate_tests.distance_m IS 'Distance run in metres at time of lactate measurement.';
+COMMENT ON COLUMN lactate_tests.lactate_mmol IS 'Blood lactate concentration in mmol/L.';
+
+-- ============================================================================
+-- SECTION 9: ACTIVITY ZONE TIME TABLE (Phase 2S - Incremental Calculation)
+-- ============================================================================
+-- Pre-calculated time in athlete-specific training zones per activity.
+-- Converted from materialized view to regular table for incremental updates.
+-- Each activity uses zones effective on that date (temporal zone matching).
+
+CREATE TABLE IF NOT EXISTS activity_zone_time (
+    -- Primary key
+    activity_id TEXT PRIMARY KEY,
+
+    -- Foreign keys
+    athlete_id TEXT NOT NULL REFERENCES athlete(athlete_id) ON DELETE CASCADE,
+    activity_date DATE NOT NULL,
+
+    -- Zone time in minutes (6 zones)
+    zone_1_minutes DECIMAL(10,2) DEFAULT 0,
+    zone_2_minutes DECIMAL(10,2) DEFAULT 0,
+    zone_3_minutes DECIMAL(10,2) DEFAULT 0,
+    zone_4_minutes DECIMAL(10,2) DEFAULT 0,
+    zone_5_minutes DECIMAL(10,2) DEFAULT 0,
+    zone_6_minutes DECIMAL(10,2) DEFAULT 0,
+    total_zone_minutes DECIMAL(10,2) DEFAULT 0,
+
+    -- Metadata
+    calculated_at TIMESTAMPTZ DEFAULT NOW(),
+
+    CONSTRAINT fk_activity_zone_time_activity
+        FOREIGN KEY (activity_id)
+        REFERENCES activity_metadata(activity_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_zone_time_athlete_date
+    ON activity_zone_time(athlete_id, activity_date DESC);
+CREATE INDEX IF NOT EXISTS idx_activity_zone_time_athlete
+    ON activity_zone_time(athlete_id);
+
+COMMENT ON TABLE activity_zone_time IS
+'Pre-calculated time in athlete-specific training zones per activity.
+Uses temporal zone matching - each activity uses zones effective on that date.
+Updated incrementally via calculate_zone_time_for_activity().';
+
+-- ============================================================================
+-- SECTION 9B: WEEKLY ZONE TIME MATERIALIZED VIEW
+-- ============================================================================
+-- Aggregates zone time per athlete per week for longitudinal analysis.
+-- Depends on activity_zone_time table.
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS weekly_zone_time AS
+SELECT
+    athlete_id,
+    DATE_TRUNC('week', activity_date)::DATE AS week_start,
+    SUM(zone_1_minutes) AS zone_1_minutes,
+    SUM(zone_2_minutes) AS zone_2_minutes,
+    SUM(zone_3_minutes) AS zone_3_minutes,
+    SUM(zone_4_minutes) AS zone_4_minutes,
+    SUM(zone_5_minutes) AS zone_5_minutes,
+    SUM(zone_6_minutes) AS zone_6_minutes,
+    SUM(total_zone_minutes) AS total_minutes,
+    COUNT(*) AS activity_count
+FROM activity_zone_time
+WHERE total_zone_minutes > 0
+GROUP BY athlete_id, DATE_TRUNC('week', activity_date)::DATE;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_zone_time_pk
+    ON weekly_zone_time(athlete_id, week_start);
+CREATE INDEX IF NOT EXISTS idx_weekly_zone_time_athlete
+    ON weekly_zone_time(athlete_id, week_start DESC);
+
+COMMENT ON MATERIALIZED VIEW weekly_zone_time IS
+'Weekly aggregation of zone time per athlete.
+Depends on activity_zone_time table.
+Refresh after imports: SELECT refresh_all_zone_views();';
+
+-- ============================================================================
+-- SECTION 9C: ZONE TIME CALCULATION FUNCTIONS
+-- ============================================================================
+
+-- Function: Calculate zone time for a single activity
+CREATE OR REPLACE FUNCTION calculate_zone_time_for_activity(p_activity_id TEXT)
+RETURNS TABLE (
+    activity_id TEXT,
+    athlete_id TEXT,
+    activity_date DATE,
+    zone_1_minutes DECIMAL,
+    zone_2_minutes DECIMAL,
+    zone_3_minutes DECIMAL,
+    zone_4_minutes DECIMAL,
+    zone_5_minutes DECIMAL,
+    zone_6_minutes DECIMAL,
+    total_zone_minutes DECIMAL,
+    was_inserted BOOLEAN
+) AS $$
+DECLARE
+    v_athlete_id TEXT;
+    v_activity_date DATE;
+    v_type TEXT;
+    v_result RECORD;
+BEGIN
+    -- Get activity metadata
+    SELECT am.athlete_id, am.date, LOWER(am.type)
+    INTO v_athlete_id, v_activity_date, v_type
+    FROM activity_metadata am
+    WHERE am.activity_id = p_activity_id;
+
+    -- Return empty if activity not found
+    IF v_athlete_id IS NULL THEN
+        RETURN QUERY SELECT
+            p_activity_id, NULL::TEXT, NULL::DATE,
+            0::DECIMAL, 0::DECIMAL, 0::DECIMAL,
+            0::DECIMAL, 0::DECIMAL, 0::DECIMAL,
+            0::DECIMAL, FALSE;
+        RETURN;
+    END IF;
+
+    -- Skip non-running activities
+    IF v_type NOT IN ('run', 'trailrun', 'virtualrun', 'treadmill') THEN
+        RETURN QUERY SELECT
+            p_activity_id, v_athlete_id, v_activity_date,
+            0::DECIMAL, 0::DECIMAL, 0::DECIMAL,
+            0::DECIMAL, 0::DECIMAL, 0::DECIMAL,
+            0::DECIMAL, FALSE;
+        RETURN;
+    END IF;
+
+    -- Calculate zone time using temporal zone matching
+    WITH
+    effective_zones AS (
+        SELECT DISTINCT ON (atz.zone_number)
+            atz.zone_number,
+            atz.pace_min_sec_per_km,
+            atz.pace_max_sec_per_km
+        FROM athlete_training_zones atz
+        WHERE atz.athlete_id = v_athlete_id
+          AND atz.effective_from_date <= v_activity_date
+        ORDER BY atz.zone_number, atz.effective_from_date DESC
+    ),
+    activity_pace AS (
+        SELECT
+            CASE
+                WHEN GREATEST(
+                    COALESCE(a.speed, 0),
+                    COALESCE(a.enhanced_speed, 0),
+                    COALESCE(a.velocity_smooth, 0)
+                ) > 0.1
+                THEN 1000.0 / GREATEST(
+                    COALESCE(a.speed, 0),
+                    COALESCE(a.enhanced_speed, 0),
+                    COALESCE(a.velocity_smooth, 0)
+                )
+                ELSE NULL
+            END AS pace_sec_per_km
+        FROM activity a
+        WHERE a.activity_id = p_activity_id
+    ),
+    zone_time AS (
+        SELECT
+            ez.zone_number,
+            COUNT(*) AS zone_seconds
+        FROM activity_pace ap
+        CROSS JOIN effective_zones ez
+        WHERE ap.pace_sec_per_km IS NOT NULL
+          AND (
+              (ez.pace_min_sec_per_km IS NULL AND ap.pace_sec_per_km <= ez.pace_max_sec_per_km)
+              OR (ez.pace_max_sec_per_km IS NULL AND ap.pace_sec_per_km > ez.pace_min_sec_per_km)
+              OR (ez.pace_min_sec_per_km IS NOT NULL
+                  AND ez.pace_max_sec_per_km IS NOT NULL
+                  AND ap.pace_sec_per_km > ez.pace_min_sec_per_km
+                  AND ap.pace_sec_per_km <= ez.pace_max_sec_per_km)
+          )
+        GROUP BY ez.zone_number
+    ),
+    zone_pivot AS (
+        SELECT
+            COALESCE(SUM(CASE WHEN zone_number = 1 THEN zone_seconds END) / 60.0, 0) AS z1,
+            COALESCE(SUM(CASE WHEN zone_number = 2 THEN zone_seconds END) / 60.0, 0) AS z2,
+            COALESCE(SUM(CASE WHEN zone_number = 3 THEN zone_seconds END) / 60.0, 0) AS z3,
+            COALESCE(SUM(CASE WHEN zone_number = 4 THEN zone_seconds END) / 60.0, 0) AS z4,
+            COALESCE(SUM(CASE WHEN zone_number = 5 THEN zone_seconds END) / 60.0, 0) AS z5,
+            COALESCE(SUM(CASE WHEN zone_number = 6 THEN zone_seconds END) / 60.0, 0) AS z6,
+            COALESCE(SUM(zone_seconds) / 60.0, 0) AS total
+        FROM zone_time
+    )
+    INSERT INTO activity_zone_time (
+        activity_id, athlete_id, activity_date,
+        zone_1_minutes, zone_2_minutes, zone_3_minutes,
+        zone_4_minutes, zone_5_minutes, zone_6_minutes,
+        total_zone_minutes, calculated_at
+    )
+    SELECT
+        p_activity_id, v_athlete_id, v_activity_date,
+        zp.z1, zp.z2, zp.z3, zp.z4, zp.z5, zp.z6,
+        zp.total, NOW()
+    FROM zone_pivot zp
+    ON CONFLICT (activity_id) DO UPDATE SET
+        zone_1_minutes = EXCLUDED.zone_1_minutes,
+        zone_2_minutes = EXCLUDED.zone_2_minutes,
+        zone_3_minutes = EXCLUDED.zone_3_minutes,
+        zone_4_minutes = EXCLUDED.zone_4_minutes,
+        zone_5_minutes = EXCLUDED.zone_5_minutes,
+        zone_6_minutes = EXCLUDED.zone_6_minutes,
+        total_zone_minutes = EXCLUDED.total_zone_minutes,
+        calculated_at = NOW()
+    RETURNING * INTO v_result;
+
+    RETURN QUERY SELECT
+        v_result.activity_id,
+        v_result.athlete_id,
+        v_result.activity_date,
+        v_result.zone_1_minutes,
+        v_result.zone_2_minutes,
+        v_result.zone_3_minutes,
+        v_result.zone_4_minutes,
+        v_result.zone_5_minutes,
+        v_result.zone_6_minutes,
+        v_result.total_zone_minutes,
+        TRUE;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION calculate_zone_time_for_activity(TEXT) IS
+'Calculates and upserts zone time for a single activity. Uses temporal zone matching.';
+
+-- Function: Refresh weekly zone view (activity-level is incremental)
+CREATE OR REPLACE FUNCTION refresh_all_zone_views()
+RETURNS void AS $$
+BEGIN
+    REFRESH MATERIALIZED VIEW CONCURRENTLY weekly_zone_time;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION refresh_all_zone_views() IS
+'Refreshes weekly_zone_time materialized view. Activity-level zone time is
+calculated incrementally via calculate_zone_time_for_activity().';
+
+-- Function: Recalculate all zone times (utility for bulk operations)
+CREATE OR REPLACE FUNCTION recalculate_all_zone_times()
+RETURNS TABLE (
+    activities_processed INTEGER,
+    duration_seconds DECIMAL
+) AS $$
+DECLARE
+    v_start TIMESTAMPTZ;
+    v_count INTEGER := 0;
+    v_activity_id TEXT;
+BEGIN
+    v_start := NOW();
+
+    FOR v_activity_id IN
+        SELECT am.activity_id
+        FROM activity_metadata am
+        WHERE LOWER(am.type) IN ('run', 'trailrun', 'virtualrun', 'treadmill')
+    LOOP
+        PERFORM calculate_zone_time_for_activity(v_activity_id);
+        v_count := v_count + 1;
+    END LOOP;
+
+    REFRESH MATERIALIZED VIEW CONCURRENTLY weekly_zone_time;
+
+    RETURN QUERY SELECT v_count, EXTRACT(EPOCH FROM NOW() - v_start)::DECIMAL;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION recalculate_all_zone_times() IS
+'Recalculates zone time for ALL activities. Use sparingly.';
+
+-- ============================================================================
+-- SECTION 9D: WEEKLY MONOTONY & STRAIN TABLE (Phase 2V)
+-- ============================================================================
+-- Pre-calculated Carl Foster Training Monotony and Strain metrics.
+-- Monotony = mean / stddev of daily training (variability indicator)
+-- Strain = Load × Monotony (accumulated stress indicator)
+
+CREATE TABLE IF NOT EXISTS weekly_monotony_strain (
+    id SERIAL PRIMARY KEY,
+    athlete_id TEXT NOT NULL REFERENCES athlete(athlete_id) ON DELETE CASCADE,
+    week_start DATE NOT NULL,
+
+    -- Zone 1 metrics
+    zone_1_load_min DECIMAL(10,2) DEFAULT 0,
+    zone_1_monotony DECIMAL(6,3) DEFAULT 0,
+    zone_1_strain DECIMAL(12,2) DEFAULT 0,
+
+    -- Zone 2 metrics
+    zone_2_load_min DECIMAL(10,2) DEFAULT 0,
+    zone_2_monotony DECIMAL(6,3) DEFAULT 0,
+    zone_2_strain DECIMAL(12,2) DEFAULT 0,
+
+    -- Zone 3 metrics
+    zone_3_load_min DECIMAL(10,2) DEFAULT 0,
+    zone_3_monotony DECIMAL(6,3) DEFAULT 0,
+    zone_3_strain DECIMAL(12,2) DEFAULT 0,
+
+    -- Zone 4 metrics
+    zone_4_load_min DECIMAL(10,2) DEFAULT 0,
+    zone_4_monotony DECIMAL(6,3) DEFAULT 0,
+    zone_4_strain DECIMAL(12,2) DEFAULT 0,
+
+    -- Zone 5 metrics
+    zone_5_load_min DECIMAL(10,2) DEFAULT 0,
+    zone_5_monotony DECIMAL(6,3) DEFAULT 0,
+    zone_5_strain DECIMAL(12,2) DEFAULT 0,
+
+    -- Zone 6 metrics
+    zone_6_load_min DECIMAL(10,2) DEFAULT 0,
+    zone_6_monotony DECIMAL(6,3) DEFAULT 0,
+    zone_6_strain DECIMAL(12,2) DEFAULT 0,
+
+    -- Total (all zones combined)
+    total_load_min DECIMAL(10,2) DEFAULT 0,
+    total_monotony DECIMAL(6,3) DEFAULT 0,
+    total_strain DECIMAL(12,2) DEFAULT 0,
+
+    -- Metadata
+    calculated_at TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE(athlete_id, week_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_weekly_monotony_strain_athlete_week
+    ON weekly_monotony_strain(athlete_id, week_start DESC);
+CREATE INDEX IF NOT EXISTS idx_weekly_monotony_strain_athlete
+    ON weekly_monotony_strain(athlete_id);
+
+COMMENT ON TABLE weekly_monotony_strain IS
+'Pre-calculated weekly Training Monotony and Strain (Carl Foster model).
+Monotony = mean / stddev of daily training minutes (capped at 10.0).
+Strain = Load × Monotony. Per-zone metrics allow flexible aggregation.';
+
+-- ============================================================================
+-- SECTION 9E: MONOTONY/STRAIN CALCULATION FUNCTIONS
+-- ============================================================================
+
+-- Function: Calculate monotony/strain for a specific week
+CREATE OR REPLACE FUNCTION calculate_monotony_strain_for_week(
+    p_athlete_id TEXT,
+    p_week_start DATE
+) RETURNS TABLE (
+    out_athlete_id TEXT,
+    out_week_start DATE,
+    out_zone_1_load_min DECIMAL, out_zone_1_monotony DECIMAL, out_zone_1_strain DECIMAL,
+    out_zone_2_load_min DECIMAL, out_zone_2_monotony DECIMAL, out_zone_2_strain DECIMAL,
+    out_zone_3_load_min DECIMAL, out_zone_3_monotony DECIMAL, out_zone_3_strain DECIMAL,
+    out_zone_4_load_min DECIMAL, out_zone_4_monotony DECIMAL, out_zone_4_strain DECIMAL,
+    out_zone_5_load_min DECIMAL, out_zone_5_monotony DECIMAL, out_zone_5_strain DECIMAL,
+    out_zone_6_load_min DECIMAL, out_zone_6_monotony DECIMAL, out_zone_6_strain DECIMAL,
+    out_total_load_min DECIMAL, out_total_monotony DECIMAL, out_total_strain DECIMAL,
+    was_inserted BOOLEAN
+) AS $$
+DECLARE
+    v_week_end DATE;
+    v_result RECORD;
+BEGIN
+    v_week_end := p_week_start + INTERVAL '6 days';
+
+    WITH
+    week_days AS (
+        SELECT generate_series(
+            p_week_start::TIMESTAMP,
+            v_week_end::TIMESTAMP,
+            '1 day'::INTERVAL
+        )::DATE AS day_date
+    ),
+    daily_zone_time AS (
+        SELECT
+            az.activity_date,
+            COALESCE(SUM(az.zone_1_minutes), 0) AS z1,
+            COALESCE(SUM(az.zone_2_minutes), 0) AS z2,
+            COALESCE(SUM(az.zone_3_minutes), 0) AS z3,
+            COALESCE(SUM(az.zone_4_minutes), 0) AS z4,
+            COALESCE(SUM(az.zone_5_minutes), 0) AS z5,
+            COALESCE(SUM(az.zone_6_minutes), 0) AS z6,
+            COALESCE(SUM(az.total_zone_minutes), 0) AS ztotal
+        FROM activity_zone_time az
+        WHERE az.athlete_id = p_athlete_id
+          AND az.activity_date >= p_week_start
+          AND az.activity_date <= v_week_end
+        GROUP BY az.activity_date
+    ),
+    full_week AS (
+        SELECT
+            wd.day_date,
+            COALESCE(dzt.z1, 0) AS z1,
+            COALESCE(dzt.z2, 0) AS z2,
+            COALESCE(dzt.z3, 0) AS z3,
+            COALESCE(dzt.z4, 0) AS z4,
+            COALESCE(dzt.z5, 0) AS z5,
+            COALESCE(dzt.z6, 0) AS z6,
+            COALESCE(dzt.ztotal, 0) AS ztotal
+        FROM week_days wd
+        LEFT JOIN daily_zone_time dzt ON wd.day_date = dzt.activity_date
+    ),
+    zone_stats AS (
+        SELECT
+            SUM(z1) AS z1_load, AVG(z1) AS z1_mean, STDDEV_POP(z1) AS z1_std,
+            SUM(z2) AS z2_load, AVG(z2) AS z2_mean, STDDEV_POP(z2) AS z2_std,
+            SUM(z3) AS z3_load, AVG(z3) AS z3_mean, STDDEV_POP(z3) AS z3_std,
+            SUM(z4) AS z4_load, AVG(z4) AS z4_mean, STDDEV_POP(z4) AS z4_std,
+            SUM(z5) AS z5_load, AVG(z5) AS z5_mean, STDDEV_POP(z5) AS z5_std,
+            SUM(z6) AS z6_load, AVG(z6) AS z6_mean, STDDEV_POP(z6) AS z6_std,
+            SUM(ztotal) AS ztotal_load, AVG(ztotal) AS ztotal_mean, STDDEV_POP(ztotal) AS ztotal_std
+        FROM full_week
+    ),
+    final_metrics AS (
+        SELECT
+            z1_load,
+            CASE WHEN z1_mean > 0 AND z1_std > 0 THEN LEAST(10.0, z1_mean / z1_std)
+                 WHEN z1_mean > 0 AND z1_std = 0 THEN 10.0 ELSE 0.0 END AS z1_monotony,
+            z2_load,
+            CASE WHEN z2_mean > 0 AND z2_std > 0 THEN LEAST(10.0, z2_mean / z2_std)
+                 WHEN z2_mean > 0 AND z2_std = 0 THEN 10.0 ELSE 0.0 END AS z2_monotony,
+            z3_load,
+            CASE WHEN z3_mean > 0 AND z3_std > 0 THEN LEAST(10.0, z3_mean / z3_std)
+                 WHEN z3_mean > 0 AND z3_std = 0 THEN 10.0 ELSE 0.0 END AS z3_monotony,
+            z4_load,
+            CASE WHEN z4_mean > 0 AND z4_std > 0 THEN LEAST(10.0, z4_mean / z4_std)
+                 WHEN z4_mean > 0 AND z4_std = 0 THEN 10.0 ELSE 0.0 END AS z4_monotony,
+            z5_load,
+            CASE WHEN z5_mean > 0 AND z5_std > 0 THEN LEAST(10.0, z5_mean / z5_std)
+                 WHEN z5_mean > 0 AND z5_std = 0 THEN 10.0 ELSE 0.0 END AS z5_monotony,
+            z6_load,
+            CASE WHEN z6_mean > 0 AND z6_std > 0 THEN LEAST(10.0, z6_mean / z6_std)
+                 WHEN z6_mean > 0 AND z6_std = 0 THEN 10.0 ELSE 0.0 END AS z6_monotony,
+            ztotal_load,
+            CASE WHEN ztotal_mean > 0 AND ztotal_std > 0 THEN LEAST(10.0, ztotal_mean / ztotal_std)
+                 WHEN ztotal_mean > 0 AND ztotal_std = 0 THEN 10.0 ELSE 0.0 END AS ztotal_monotony
+        FROM zone_stats
+    )
+    INSERT INTO weekly_monotony_strain (
+        athlete_id, week_start,
+        zone_1_load_min, zone_1_monotony, zone_1_strain,
+        zone_2_load_min, zone_2_monotony, zone_2_strain,
+        zone_3_load_min, zone_3_monotony, zone_3_strain,
+        zone_4_load_min, zone_4_monotony, zone_4_strain,
+        zone_5_load_min, zone_5_monotony, zone_5_strain,
+        zone_6_load_min, zone_6_monotony, zone_6_strain,
+        total_load_min, total_monotony, total_strain,
+        calculated_at
+    )
+    SELECT
+        p_athlete_id, p_week_start,
+        fm.z1_load, fm.z1_monotony, fm.z1_load * fm.z1_monotony,
+        fm.z2_load, fm.z2_monotony, fm.z2_load * fm.z2_monotony,
+        fm.z3_load, fm.z3_monotony, fm.z3_load * fm.z3_monotony,
+        fm.z4_load, fm.z4_monotony, fm.z4_load * fm.z4_monotony,
+        fm.z5_load, fm.z5_monotony, fm.z5_load * fm.z5_monotony,
+        fm.z6_load, fm.z6_monotony, fm.z6_load * fm.z6_monotony,
+        fm.ztotal_load, fm.ztotal_monotony, fm.ztotal_load * fm.ztotal_monotony,
+        NOW()
+    FROM final_metrics fm
+    ON CONFLICT (athlete_id, week_start) DO UPDATE SET
+        zone_1_load_min = EXCLUDED.zone_1_load_min,
+        zone_1_monotony = EXCLUDED.zone_1_monotony,
+        zone_1_strain = EXCLUDED.zone_1_strain,
+        zone_2_load_min = EXCLUDED.zone_2_load_min,
+        zone_2_monotony = EXCLUDED.zone_2_monotony,
+        zone_2_strain = EXCLUDED.zone_2_strain,
+        zone_3_load_min = EXCLUDED.zone_3_load_min,
+        zone_3_monotony = EXCLUDED.zone_3_monotony,
+        zone_3_strain = EXCLUDED.zone_3_strain,
+        zone_4_load_min = EXCLUDED.zone_4_load_min,
+        zone_4_monotony = EXCLUDED.zone_4_monotony,
+        zone_4_strain = EXCLUDED.zone_4_strain,
+        zone_5_load_min = EXCLUDED.zone_5_load_min,
+        zone_5_monotony = EXCLUDED.zone_5_monotony,
+        zone_5_strain = EXCLUDED.zone_5_strain,
+        zone_6_load_min = EXCLUDED.zone_6_load_min,
+        zone_6_monotony = EXCLUDED.zone_6_monotony,
+        zone_6_strain = EXCLUDED.zone_6_strain,
+        total_load_min = EXCLUDED.total_load_min,
+        total_monotony = EXCLUDED.total_monotony,
+        total_strain = EXCLUDED.total_strain,
+        calculated_at = NOW()
+    RETURNING * INTO v_result;
+
+    RETURN QUERY SELECT
+        v_result.athlete_id, v_result.week_start,
+        v_result.zone_1_load_min, v_result.zone_1_monotony, v_result.zone_1_strain,
+        v_result.zone_2_load_min, v_result.zone_2_monotony, v_result.zone_2_strain,
+        v_result.zone_3_load_min, v_result.zone_3_monotony, v_result.zone_3_strain,
+        v_result.zone_4_load_min, v_result.zone_4_monotony, v_result.zone_4_strain,
+        v_result.zone_5_load_min, v_result.zone_5_monotony, v_result.zone_5_strain,
+        v_result.zone_6_load_min, v_result.zone_6_monotony, v_result.zone_6_strain,
+        v_result.total_load_min, v_result.total_monotony, v_result.total_strain,
+        TRUE;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION calculate_monotony_strain_for_week(TEXT, DATE) IS
+'Calculates weekly Training Monotony and Strain (Carl Foster model).
+Monotony = mean / stddev (capped at 10.0). Strain = Load × Monotony.';
+
+-- Function: Backfill historical monotony/strain data
+CREATE OR REPLACE FUNCTION backfill_monotony_strain()
+RETURNS TABLE (
+    weeks_processed INTEGER,
+    athletes_processed INTEGER,
+    duration_seconds DECIMAL
+) AS $$
+DECLARE
+    v_start TIMESTAMPTZ;
+    v_week_count INTEGER := 0;
+    v_athlete_count INTEGER := 0;
+    v_athlete_id TEXT;
+    v_week_start DATE;
+BEGIN
+    v_start := NOW();
+
+    FOR v_athlete_id, v_week_start IN
+        SELECT DISTINCT
+            az.athlete_id,
+            DATE_TRUNC('week', az.activity_date)::DATE AS week_start
+        FROM activity_zone_time az
+        ORDER BY az.athlete_id, week_start
+    LOOP
+        PERFORM calculate_monotony_strain_for_week(v_athlete_id, v_week_start);
+        v_week_count := v_week_count + 1;
+    END LOOP;
+
+    SELECT COUNT(DISTINCT athlete_id) INTO v_athlete_count
+    FROM weekly_monotony_strain;
+
+    RETURN QUERY SELECT v_week_count, v_athlete_count,
+        EXTRACT(EPOCH FROM NOW() - v_start)::DECIMAL;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION backfill_monotony_strain() IS
+'Backfills weekly_monotony_strain with historical data.';
+
+-- ============================================================================
+-- SECTION 10: FINAL SETUP
 -- ============================================================================
 
 -- Grant permissions
@@ -736,10 +1306,22 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO authenticated;
 --
 -- ✅ Database schema deployed successfully!
 --
+-- Expected objects created:
+-- - Tables (14): athlete, users, activity_metadata, activity, activity_intervals,
+--   wellness, personal_records, personal_records_history, athlete_training_zones,
+--   daily_workout_surveys, weekly_wellness_surveys, lactate_tests,
+--   activity_zone_time, weekly_monotony_strain
+-- - Materialized Views (2): activity_pace_zones, weekly_zone_time
+-- - Functions: get_athlete_zones_for_date, archive_personal_record,
+--   refresh_pace_zones_view, calculate_zone_time_for_activity,
+--   refresh_all_zone_views, recalculate_all_zone_times,
+--   calculate_monotony_strain_for_week, backfill_monotony_strain
+--
 -- Next steps:
--- 1. Verify tables created: Run verification script
--- 2. Update environment variables with new project credentials
--- 3. Test dashboard connection
--- 4. Import data using ingestion scripts
+-- 1. Verify tables: SELECT table_name FROM information_schema.tables WHERE table_schema='public';
+-- 2. Update .env with new project credentials
+-- 3. Run: SELECT backfill_monotony_strain(); (if importing existing data)
+-- 4. Test dashboard connection
+-- 5. Import data using ingestion scripts
 --
 -- ============================================================================
