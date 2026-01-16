@@ -4118,20 +4118,27 @@ def server(input, output, session):
     @render.ui
     def race_selector_dropdown():
         """Render race selector dropdown based on current athlete."""
-        role = user_role.get()
-        if role == "coach":
-            athlete_name = input.athlete() if hasattr(input, 'athlete') else None
-            athlete_id = name_to_id.get(athlete_name) if athlete_name else None
-        else:
-            athlete_id = user_athlete_id.get()
+        try:
+            role = user_role.get()
+            if role == "coach":
+                try:
+                    athlete_name = input.athlete()
+                except Exception:
+                    athlete_name = None
+                athlete_id = name_to_id.get(athlete_name) if athlete_name else None
+            else:
+                athlete_id = user_athlete_id.get()
 
-        if not athlete_id:
-            return ui.p("Sélectionnez un athlète", style="color: #666; font-style: italic; margin: 0;")
+            if not athlete_id:
+                return ui.p("Sélectionnez un athlète", style="color: #666; font-style: italic; margin: 0;")
 
-        races = get_athlete_races(athlete_id)
+            races = get_athlete_races(athlete_id)
 
-        if not races:
-            return ui.p("Aucune course enregistrée", style="color: #666; font-style: italic; margin: 0;")
+            if not races:
+                return ui.p("Aucune course enregistrée", style="color: #666; font-style: italic; margin: 0;")
+        except Exception as e:
+            print(f"Error in race_selector_dropdown: {e}")
+            return ui.p("Erreur de chargement", style="color: #666; font-style: italic; margin: 0;")
 
         # Build choices dict
         choices = {"": "-- Sélectionner une course --"}
@@ -4160,7 +4167,11 @@ def server(input, output, session):
     @render.ui
     def simulated_race_date_input():
         """Render date input for race simulation."""
-        if not input.show_simulated_race():
+        try:
+            show_sim = input.show_simulated_race()
+        except Exception:
+            show_sim = False
+        if not show_sim:
             return ui.div()  # Hidden when checkbox unchecked
 
         return ui.input_date(
