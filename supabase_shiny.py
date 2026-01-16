@@ -3572,7 +3572,11 @@ def server(input, output, session):
 
         # Add race markers (vertical lines) - same as zone_time_longitudinal
         try:
-            selected_race_id = input.selected_race() if hasattr(input, 'selected_race') else None
+            # Safely get selected_race - might not exist if dropdown wasn't rendered
+            try:
+                selected_race_id = input.selected_race()
+            except Exception:
+                selected_race_id = None
             if selected_race_id and selected_race_id != "":
                 race = get_race_by_id(int(selected_race_id))
                 if race:
@@ -3597,8 +3601,15 @@ def server(input, output, session):
                             annotation_font_color="#F59E0B"
                         )
 
-                        if input.show_simulated_race():
-                            sim_date = input.simulated_race_date() if hasattr(input, 'simulated_race_date') else None
+                        try:
+                            show_sim = input.show_simulated_race()
+                        except Exception:
+                            show_sim = False
+                        if show_sim:
+                            try:
+                                sim_date = input.simulated_race_date()
+                            except Exception:
+                                sim_date = None
                             if sim_date:
                                 sim_date_str = sim_date.strftime('%Y-%m-%d') if hasattr(sim_date, 'strftime') else str(sim_date)
                                 fig.add_vline(
@@ -4497,7 +4508,11 @@ def server(input, output, session):
 
         # Add race markers (vertical lines)
         try:
-            selected_race_id = input.selected_race() if hasattr(input, 'selected_race') else None
+            # Safely get selected_race - might not exist if dropdown wasn't rendered
+            try:
+                selected_race_id = input.selected_race()
+            except Exception:
+                selected_race_id = None
             if selected_race_id and selected_race_id != "":
                 race = get_race_by_id(int(selected_race_id))
                 if race:
@@ -4525,8 +4540,15 @@ def server(input, output, session):
                         )
 
                         # Simulated race marker (if enabled)
-                        if input.show_simulated_race():
-                            sim_date = input.simulated_race_date() if hasattr(input, 'simulated_race_date') else None
+                        try:
+                            show_sim = input.show_simulated_race()
+                        except Exception:
+                            show_sim = False
+                        if show_sim:
+                            try:
+                                sim_date = input.simulated_race_date()
+                            except Exception:
+                                sim_date = None
                             if sim_date:
                                 sim_date_str = sim_date.strftime('%Y-%m-%d') if hasattr(sim_date, 'strftime') else str(sim_date)
                                 fig.add_vline(
