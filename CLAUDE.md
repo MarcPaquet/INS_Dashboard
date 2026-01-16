@@ -2,7 +2,7 @@
 
 **Project:** Intervals.icu → Supabase Data Ingestion System
 **Team:** Saint-Laurent Sélect Running Club
-**Last Updated:** December 23, 2025
+**Last Updated:** January 16, 2026 (AWS Setup Session)
 **Status:** ✅ **PRODUCTION LIVE** - https://insquebec-sportsciences.shinyapps.io/saintlaurentselect_dashboard/
 
 ---
@@ -14,6 +14,8 @@
 | **Marc (Owner)** | Update after each session. Keep CONTEXT current, move completed tasks to ARCHIVE. |
 | **Claude Code** | Read CONTEXT first, check BACKLOG for priorities, reference ARCHIVE for history. |
 
+**Note:** For detailed archive information (full implementation details, code changes, debugging sessions), also read `ARCHIVE_DETAILED.md`.
+
 ---
 
 # 📚 TABLE OF CONTENTS
@@ -24,6 +26,7 @@
 - [Architecture & Tech Stack](#-architecture--tech-stack)
 - [Current State](#-current-state)
 - [Core Principles](#-core-principles)
+- [Notion Integration](#-notion-integration)
 
 **PART 2: BACKLOG** (What to Do)
 - [NOW - Immediate Priorities](#now---immediate-priorities)
@@ -44,7 +47,7 @@
 
 ### What is this?
 
-**INS Dashboard** = Sports science analytics platform for a running club (5 athletes + 1 coach).
+**INS Dashboard** = Sports science analytics platform for a running club (23 athletes + 1 coach account).
 
 ```
 Intervals.icu (watches) → Supabase (database) → Shiny Dashboard (analytics)
@@ -74,23 +77,53 @@ Better Training Decisions
 
 ## 👥 ATHLETES & AUTHENTICATION
 
-### Club Members (Current: 5 athletes + 1 coach, expanding to ~12 athletes)
+### Club Members (23 athletes + 2 coaches)
 
-| Athlete | Intervals.icu ID | Login | Role |
-|---------|------------------|-------|------|
-| Matthew Beaudet | `i344978` | Matthew | athlete |
-| Kevin Robertson | `i344979` | Kevin1 | athlete |
-| Kevin A. Robertson | `i344980` | Kevin2 | athlete |
-| Zakary Mama-Yari | `i347434` | Zakary | athlete |
-| Sophie Courville | `i95073` | Sophie | athlete |
-| Coach | N/A | Coach | coach |
-| *~7 more athletes* | *TBD by manager* | *TBD* | athlete |
+**Existing Athletes (5):**
+| Member | Intervals.icu ID | Role |
+|--------|------------------|------|
+| Matthew Beaudet | `i344978` | athlete |
+| Kevin Robertson | `i344979` | athlete |
+| Kevin A. Robertson | `i344980` | athlete |
+| Zakary Mama-Yari | `i347434` | athlete |
+| Sophie Courville | `i95073` | athlete |
 
-**Note:** Manager will provide new athlete IDs and API keys. Add to `athletes.json.local` and add a line to the bulk import script per athlete.
+**New Athletes with Intervals.icu (13):**
+| Member | Intervals.icu ID | Role |
+|--------|------------------|------|
+| Alex Larochelle | `i453408` | athlete |
+| Alexandrine Coursol | `i454587` | athlete |
+| Doan Tran | `i453651` | athlete |
+| Jade Essabar | `jadeessabar` | athlete |
+| Marc-Andre Trudeau Perron | `i453625` | athlete |
+| Marine Garnier | `i197667` | athlete |
+| Myriam Poirier | `i453790` | athlete |
+| Nazim Berrichi | `i453396` | athlete |
+| Robin Lefebvre | `i453411` | athlete |
+| Yassine Aber | `i453944` | athlete |
+| Evans Stephen | `i454589` | athlete |
+| Ilyass Kasmi | `i248571` | athlete |
+| Emma Veilleux | `i172048` | athlete |
+
+**Login-Only Athletes (5) - No data import:**
+| Member | Intervals.icu ID | Note |
+|--------|------------------|------|
+| Cedrik Flipo | - | No Intervals.icu |
+| Genevieve Paquin | - | No Intervals.icu |
+| Renaud Bordeleau | - | No Intervals.icu |
+| Simone Plourde | - | No Intervals.icu |
+| Elie Nayrand | `i453407` | **API KEY PENDING** |
+
+**Coach (1 shared account for Samuel & Kerrian):**
+| Login | Password | Role |
+|-------|----------|------|
+| Coach | Coach | coach |
+
+**Note:** Roster updated Jan 14, 2026. Users created, SQL migration executed. **PENDING: Data import (dry run then full import).**
 
 ### Access Control
 - **Athletes:** See only their own data
-- **Coach:** Can view all athletes + select specific athlete via dropdown
+- **Coaches (Samuel, Kerrian):** Can view all athletes + select specific athlete via dropdown
 
 ---
 
@@ -168,7 +201,183 @@ Better Training Decisions
 | Weather Coverage | 100% (outdoor activities) |
 | HR Coverage | 100% (when monitor used) |
 
-### 🔧 Recent Session (Dec 23, 2025)
+### 🔧 Recent Session (Jan 16, 2026)
+
+**AWS Infrastructure Setup - IN PROGRESS**
+
+Started AWS infrastructure setup for automated data ingestion. Completed Secrets Manager, IAM, and EC2 launch. Paused before configuring EC2 environment.
+
+**What Was Done:**
+- ✅ Created billing alert ($10 threshold)
+- ✅ Created 3 secrets in AWS Secrets Manager:
+  - `ins-dashboard/supabase` - Database credentials
+  - `ins-dashboard/athletes` - 18 athlete API keys
+  - `ins-dashboard/config` - Configuration settings
+- ✅ Created comprehensive AWS setup guide: `AWS_SETUP_GUIDE.md`
+- ✅ Created IAM Policy `INS-Dashboard-SecretsAccess`
+- ✅ Created IAM Role `INS-Dashboard-EC2-Role`
+- ✅ Launched EC2 instance `INS-Bulk-Import` (t3.small, Ubuntu 24.04)
+
+**AWS Resources Created:**
+
+| Resource | Name | Region | Status |
+|----------|------|--------|--------|
+| Secret | `ins-dashboard/supabase` | ca-central-1 | ✅ Created |
+| Secret | `ins-dashboard/athletes` | ca-central-1 | ✅ Created |
+| Secret | `ins-dashboard/config` | ca-central-1 | ✅ Created |
+| IAM Policy | `INS-Dashboard-SecretsAccess` | Global | ✅ Created |
+| IAM Role | `INS-Dashboard-EC2-Role` | Global | ✅ Created |
+| EC2 Instance | `INS-Bulk-Import` | ca-central-1 | ✅ Launched |
+
+**Next Steps (To Resume):**
+1. ⏳ Connect to EC2 via Session Manager
+2. ⏳ Install Python and dependencies
+3. ⏳ Upload/create ingestion scripts
+4. ⏳ Run bulk import for all 18 athletes
+5. ⏳ **IMPORTANT: Terminate EC2 after import** (avoid charges)
+
+**Reference:** See `AWS_SETUP_GUIDE.md` for complete step-by-step instructions.
+
+---
+
+### Previous Session (Jan 14, 2026)
+
+**Complete Roster Replacement - USERS CREATED, PENDING DATA IMPORT**
+
+Replaced entire roster with new athlete list. Removed 8 old athletes, added 18 new athletes with Intervals.icu credentials.
+
+**What Was Done:**
+- ✅ Updated `athletes.json.local` with 18 athletes (those with API keys)
+- ✅ Updated `shiny_env.env` with 24 password variables
+- ✅ Updated `create_users.py` with 24 users (23 athletes + 1 coach)
+- ✅ Created `migrations/roster_update_jan_2026.sql`
+- ✅ Ran `create_users.py` - 24 users created in database
+- ✅ Ran SQL migration - 14 athletes + 84 training zones inserted
+
+**Dry Run #1 Results (Jan 14, 2026 @ 21:04) - 30 Days Test:**
+```
+Period: 2025-12-15 → 2026-01-14
+Command: python intervals_hybrid_to_supabase.py --oldest 2025-12-15 --newest 2026-01-14 --dry-run
+```
+
+| Metric | Value | Status |
+|--------|-------|--------|
+| Athletes processed | 12/18 | ✅ |
+| Activities found | 369 | ✅ |
+| Activities processed | 369 | ✅ |
+| Failures | 0 | ✅ |
+
+**Data Sources:**
+| Source | Count | % |
+|--------|-------|---|
+| FIT files | 172 | 46.6% |
+| Stream fallback | 71 | 19.2% |
+| Cross-training (metadata only) | 126 | 34.2% |
+
+**Data Quality:**
+| Metric | Result |
+|--------|--------|
+| Weather coverage | 156/156 outdoor (100%) ✅ |
+| HR coverage | 238/243 (98%) ✅ |
+| Wellness data | 12/18 athletes ✅ |
+
+**Athletes Without Activities (6):** Kevin Robertson, Yassine Aber, Evans Stephen, Ilyass Kasmi (no running activities in period), plus some new athletes not yet logging.
+
+**Known Issues (Working as Expected):**
+- Sophie Courville & Emma Veilleux: FIT firmware bug → Stream fallback works perfectly
+- 5 activities without HR → Athletes weren't wearing HR monitors
+
+---
+
+**Pending Steps:**
+1. ✅ **Dry run import #1** - 30 days test PASSED
+2. ⏳ **Dry run import #2** - Full date range (compare with #1)
+3. ⏳ **Full data import** for all 18 athletes:
+   ```bash
+   python intervals_hybrid_to_supabase.py --oldest 2024-01-01 --newest 2026-01-14
+   ```
+4. ⏳ **Redeploy dashboard** to ShinyApps.io after import verification
+
+---
+
+**Previous Session (Jan 3, 2026):**
+
+**Phase 3A: Mobile Tab Restriction - DEPLOYED**
+
+Restricted mobile users (screen width < 768px) to only see "Questionnaires" and "Entrée de données manuelle" tabs for improved mobile UX.
+
+**Changes:**
+- Added CSS media query rules to hide 3 desktop-only tabs on mobile
+- Added JavaScript enforcement to redirect users to allowed tabs
+- Blocks keyboard/programmatic navigation to hidden tabs
+- Handles desktop ↔ mobile resize transitions
+
+**Code Changes (supabase_shiny.py):**
+- Lines 2000-2020: CSS rules in `@media (max-width: 768px)` block
+- Lines 2289-2338: JavaScript enforcement logic (IIFE with tab restriction)
+
+**Behavior:**
+- Mobile users only see: "Questionnaires", "Entrée de données manuelle"
+- Defaults to "Questionnaires" tab on mobile
+- Applies to both athletes and coaches
+- No bypass option (strict mobile mode)
+
+---
+
+**Previous Session (Dec 29, 2025):**
+
+**Phase 2Y: Monotony/Strain Overlay on Zone Graph - DEPLOYED**
+
+Replaced the separate Monotony/Strain graph with overlay checkboxes on the "Zones d'allure" graph.
+
+**Changes:**
+- Added two checkboxes: "Monotonie" and "Strain" (can be toggled independently)
+- Monotony displays as purple dotted line on secondary Y-axis (right)
+- Strain displays as red dash-dot line on tertiary Y-axis (far right)
+- Removed separate monotony/strain graph section
+- Uses same zone selection as the main zone graph
+
+**Code Changes (supabase_shiny.py):**
+- Lines ~2376-2384: Added `show_monotony` and `show_strain` checkboxes
+- Lines ~4164-4205: Monotony/Strain overlay logic in `zone_time_longitudinal()`
+- Lines ~4263-4289: Secondary/tertiary Y-axes configuration
+- Removed `monotony_strain_graph()` function and related UI
+
+---
+
+**Phase 2Z: Personal Records Expansion - DEPLOYED**
+
+Expanded personal records feature with 15 distances and millisecond support.
+
+**New Distances (15 total):**
+- 400m, 800m, 1000m, 1500m, mile, 2000m, 3000m
+- 2000m steeple, 3000m steeple
+- 5000m, 10000m, 5km (route), 10km (route)
+- Semi-marathon, Marathon
+
+**Millisecond Support:**
+- Time format: `HH:MM:SS:ms` (e.g., `3:45:12:50`)
+- Database: `time_seconds` changed from INTEGER to DECIMAL(10,3)
+- Display: Shows centiseconds when present (e.g., `3:45:12`)
+
+**Files Modified:**
+- `supabase_shiny.py`: Updated DISTANCES array, `calculate_pace()`, `parse_time_to_seconds()`, `format_time_from_seconds()`
+- `complete_database_schema.sql`: Updated personal_records table schema
+- NEW: `migrations/update_personal_records_schema.sql`
+
+**Database Migration Required:** Run in Supabase SQL Editor (completed)
+
+---
+
+**Previous Session (Dec 28, 2025):**
+
+**Phase 2X: Conditional Tooltip Display - DEPLOYED**
+
+Modified questionnaire tooltip system to only show the red triangle indicator when there's actual tooltip text to display.
+
+---
+
+**Previous Session (Dec 23, 2025):**
 
 **Schema Sync & GitHub Update - COMPLETE**
 
@@ -287,36 +496,134 @@ except: calculate_from_records()
 
 ---
 
+## 📝 NOTION INTEGRATION
+
+### Overview
+
+Claude Code is connected to Marc's Notion workspace via MCP. This enables reading meeting notes and managing tasks directly from conversations.
+
+**IMPORTANT:** At the start of each conversation, read the Notion "To do" database to get current tasks and priorities.
+
+### Notion Structure
+
+| Page/Database | Purpose |
+|---------------|---------|
+| **Dashboard INS** | Main project page with context and links |
+| **Notes de rencontre** | Meeting notes (nested under Dashboard INS) |
+| **To do** | Task database with status tracking (PRIMARY task tracker) |
+
+### To-Do Database Schema
+
+| Property | Values |
+|----------|--------|
+| **État (Status)** | Pas commencé → En cours → Terminé |
+| **Priorité** | Faible, Moyenne, Élevée |
+| **Type de tâche** | Critique, Bug, Demande de fonctionnalité, Perfectionnement |
+| **Niveau d'effort** | Faible, Moyenne, Élevé |
+
+### Task Tracking Workflow
+
+```
+1. START OF CONVERSATION: Read Notion "To do" to get current tasks
+2. DURING WORK: Update task status in Notion as work progresses
+3. Keep CLAUDE.md BACKLOG section synced with Notion for context
+4. Notion = primary tracker (Marc creates tasks manually)
+5. CLAUDE.md = backup context (ensures Claude has full picture)
+```
+
+### Current Tasks (synced from Notion)
+
+| Task | Status | Priority | Type |
+|------|--------|----------|------|
+| Set-up AWS pour ingestion | En cours | Moyenne | Critique |
+| Set-up cron dans AWS | Pas commencé | Moyenne | Critique |
+| Ajouter tableau de suivi des RPE | Pas commencé | Faible | Fonctionnalité |
+| Ajouter tableau suivi wellness | Pas commencé | Faible | Fonctionnalité |
+| Ajout de marqueur pour race | Pas commencé | Faible | Fonctionnalité |
+
+### CRITICAL RULES
+
+1. **NEVER delete anything** without explicit user approval
+2. **NEVER add tasks** without listing them first and waiting for approval
+3. **Always confirm** before modifying any Notion content
+4. **Language**: Notion content in **French**, conversation with Marc in **English**
+
+### Workflow for Adding Tasks from Meeting Notes
+
+```
+1. User asks to review meeting notes
+2. Claude reads "Notes de rencontre"
+3. Claude lists proposed tasks with details
+4. User approves/modifies the list
+5. Only THEN Claude adds approved items to "To do"
+```
+
+### Permissions
+
+- **Read**: Always allowed (meeting notes, to-do list, project pages)
+- **Create**: Only after explicit approval
+- **Update**: Only after explicit approval
+- **Delete**: FORBIDDEN without explicit consent (risk of data loss)
+
+---
+
 # PART 2: BACKLOG
 
 ## NOW - Immediate Priorities
 
+### 🔴 Priority 0: Data Import for New Athletes - PENDING
+
+**Goal:** Import activity data for all 18 athletes with Intervals.icu credentials
+**Status:** Users created, SQL migration done, awaiting dry run + import
+
+| Step | Command | Status |
+|------|---------|--------|
+| Dry run test | `python intervals_hybrid_to_supabase.py --oldest 2024-01-01 --newest 2025-01-14 --dry-run` | ⏳ Pending |
+| Full import | `python intervals_hybrid_to_supabase.py --oldest 2024-01-01 --newest 2025-01-14` | ⏳ Pending |
+| Redeploy dashboard | See deployment command in Quick Reference | ⏳ Pending |
+
+---
+
 ### 🟡 Priority 1: AWS Setup for Automation - IN PROGRESS
 
 **Goal:** Automated daily ingestion + one-time bulk historical import
-**Status:** Marc has started AWS setup (Dec 23, 2025)
+**Status:** Secrets Manager + IAM completed (Jan 16, 2026), EC2 pending
+**Region:** `ca-central-1` (Canada Central)
+**Guide:** See `AWS_SETUP_GUIDE.md` for detailed instructions
 
 | Task | Service | Status |
 |------|---------|--------|
-| Set up billing alert ($10) | AWS Console | ⏳ Pending |
-| Create IAM role | IAM | ⏳ Pending |
-| Store credentials | Secrets Manager | ⏳ Pending |
+| Set up billing alert ($10) | AWS Console | ✅ Done |
+| Store credentials | Secrets Manager | ✅ Done (3 secrets) |
+| Create IAM policy | IAM | ✅ Done (`INS-Dashboard-SecretsAccess`) |
+| Create IAM role for EC2 | IAM | ✅ Done (`INS-Dashboard-EC2-Role`) |
+| Launch EC2 for bulk import | EC2 | ✅ Done (`INS-Bulk-Import`) |
+| Configure EC2 environment | EC2 | ⏳ Pending |
+| Run bulk import (2024-2026) | EC2 | ⏳ Pending |
+| **Terminate EC2** | EC2 | ⏳ After import |
+| Create IAM role for Lambda | IAM | ⏳ Pending (after bulk import) |
 | Deploy Lambda function | Lambda | ⏳ Pending |
 | Configure daily cron (6 AM ET) | EventBridge | ⏳ Pending |
-| Launch EC2 for bulk import | EC2 | ⏳ Pending |
-| Run bulk import (2021-2024) | EC2 | ⏳ Pending |
 
-**AWS Services:**
+**Secrets Created (Jan 16, 2026):**
+
+| Secret Name | Contents | Created |
+|-------------|----------|---------|
+| `ins-dashboard/supabase` | Supabase URL + Service Role Key | ✅ 00:14 UTC |
+| `ins-dashboard/athletes` | 18 athletes with API keys | ✅ 00:19 UTC |
+| `ins-dashboard/config` | Timeouts, timezone, URLs | ✅ 00:20 UTC |
+
+**AWS Services & Estimated Costs:**
 
 | Service | Purpose | Cost |
 |---------|---------|------|
+| Secrets Manager | Store credentials (3 secrets) | ~$1.20/month |
 | Lambda | Daily ingestion (5 min/day) | ~$2-5/month |
 | EventBridge | Cron trigger | Free |
-| Secrets Manager | Store Supabase keys | ~$1/month |
-| EC2 | Bulk import (one-time, 2-3 hrs) | ~$0.05 total |
+| EC2 | Bulk import (one-time, 2-4 hrs) | ~$0.05 total |
 | CloudWatch | Logs & monitoring | ~$1-2/month |
 
-**Total: ~$5-10/month**
+**Total: ~$5-10/month ongoing**
 
 ### 🟡 Priority 2: Run Remaining Migrations
 
@@ -532,6 +839,104 @@ ON-DEMAND (Refresh Button):
 └──────────────┘
 ```
 
+### 🔐 AWS Secrets Manager - Complete Secret List
+
+**IMPORTANT:** These are ALL the secrets needed for AWS Lambda/EC2 automation.
+
+#### Secret 1: `ins-dashboard/supabase` (JSON)
+```json
+{
+  "SUPABASE_URL": "https://vqcqqfddgnvhcrxcaxjf.supabase.co",
+  "SUPABASE_SERVICE_ROLE_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZxY3FxZmRkZ252aGNyeGNheGpmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MjEwMDUyNCwiZXhwIjoyMDc3Njc2NTI0fQ.JM7kDSnDIPdBqZN0DrW-BEA7VaavS3_Kp_dT9Q-Mtmo"
+}
+```
+
+#### Secret 2: `ins-dashboard/athletes` (JSON)
+```json
+[
+  {"id": "i344978", "name": "Matthew Beaudet", "api_key": "3o9i1mgt6e7yfzoktkc0fmrj2"},
+  {"id": "i344979", "name": "Kevin Robertson", "api_key": "2s39s4kmmhnw02y32qp4lgw4q"},
+  {"id": "i344980", "name": "Kevin A. Robertson", "api_key": "7jwc28oik78tdjixjl94l8wee"},
+  {"id": "i95073", "name": "Sophie Courville", "api_key": "99atczyc8ajd1z510hdlh0aw"},
+  {"id": "i347434", "name": "Zakary Mama-Yari", "api_key": "70rmcmsk297dkkgnevn7wwupc"},
+  {"id": "i453408", "name": "Alex Larochelle", "api_key": "jkdw4ivm6wvudmiwoh7olzyd"},
+  {"id": "i454587", "name": "Alexandrine Coursol", "api_key": "2o0xpawaj99soor5blv66lxbf"},
+  {"id": "i453651", "name": "Doan Tran", "api_key": "75db3mdf3xo7wjco981r71frn"},
+  {"id": "jadeessabar", "name": "Jade Essabar", "api_key": "1cy45wy7nldmza14wzsr25oie"},
+  {"id": "i453625", "name": "Marc-Andre Trudeau Perron", "api_key": "1zuh81vaeu1hc9th63gteatsj"},
+  {"id": "i197667", "name": "Marine Garnier", "api_key": "yi34bczjcunrzlb8divoampg"},
+  {"id": "i453790", "name": "Myriam Poirier", "api_key": "1p9yhcxs6cx8oh0c7t0xrlxbw"},
+  {"id": "i453396", "name": "Nazim Berrichi", "api_key": "4qxdul0cod6xpzg7qoi086tmx"},
+  {"id": "i453411", "name": "Robin Lefebvre", "api_key": "3b906pd2t8lwsk215dbp7lw6v"},
+  {"id": "i453944", "name": "Yassine Aber", "api_key": "5yhz82b6a4unz7afweqfmmd08"},
+  {"id": "i454589", "name": "Evans Stephen", "api_key": "11ayv0bp65zwf7whezd9m83sh"},
+  {"id": "i248571", "name": "Ilyass Kasmi", "api_key": "4bcyuvuzdu2yctsl9dwxx38mi"},
+  {"id": "i172048", "name": "Emma Veilleux", "api_key": "4bcyuvuzdu2yctsl9dwxx38mi"}
+]
+```
+
+#### Secret 3: `ins-dashboard/config` (JSON) - Optional
+```json
+{
+  "INTERVALS_API_URL": "https://intervals.icu/api/v1",
+  "OPENMETEO_API_URL": "https://api.open-meteo.com",
+  "OM_TIMEOUT": "10",
+  "AQ_TIMEOUT": "10",
+  "BATCH_SIZE": "500",
+  "MAX_RETRIES": "3",
+  "RETRY_DELAY": "2",
+  "INS_TZ": "America/Toronto"
+}
+```
+
+#### Summary Table
+
+| Secret Name | Type | Contents | Required |
+|-------------|------|----------|----------|
+| `ins-dashboard/supabase` | JSON | Supabase URL + Service Role Key | ✅ Yes |
+| `ins-dashboard/athletes` | JSON | 18 athletes with Intervals.icu API keys | ✅ Yes |
+| `ins-dashboard/config` | JSON | API URLs, timeouts, config | Optional (can hardcode) |
+
+**Total Secrets: 2-3** (depending on whether you store config in code or Secrets Manager)
+
+#### AWS CLI Commands to Create Secrets
+
+```bash
+# Create Supabase secret
+aws secretsmanager create-secret \
+  --name "ins-dashboard/supabase" \
+  --description "Supabase credentials for INS Dashboard" \
+  --secret-string '{"SUPABASE_URL":"https://vqcqqfddgnvhcrxcaxjf.supabase.co","SUPABASE_SERVICE_ROLE_KEY":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."}'
+
+# Create Athletes secret (from file)
+aws secretsmanager create-secret \
+  --name "ins-dashboard/athletes" \
+  --description "Intervals.icu API keys for all athletes" \
+  --secret-string file://athletes.json.local
+```
+
+#### Lambda Code to Retrieve Secrets
+
+```python
+import boto3
+import json
+
+def get_secrets():
+    client = boto3.client('secretsmanager', region_name='us-east-1')
+
+    # Get Supabase credentials
+    supabase_secret = client.get_secret_value(SecretId='ins-dashboard/supabase')
+    supabase = json.loads(supabase_secret['SecretString'])
+
+    # Get athlete API keys
+    athletes_secret = client.get_secret_value(SecretId='ins-dashboard/athletes')
+    athletes = json.loads(athletes_secret['SecretString'])
+
+    return supabase, athletes
+```
+
+---
+
 ### API Rate Limits
 
 **Intervals.icu API:**
@@ -585,7 +990,7 @@ wait  # Wait for all to complete
 |---------|-------|--------------|
 | Lambda | 30 invocations × 5 min | ~$2-5 |
 | EventBridge | 30 triggers | Free |
-| Secrets Manager | 2 secrets | ~$1 |
+| Secrets Manager | 2-3 secrets | ~$1.20 |
 | CloudWatch Logs | Minimal | ~$1-2 |
 | EC2 (one-time) | 3 hours | $0.05 total |
 | **TOTAL** | | **~$5-10/month** |
@@ -655,6 +1060,8 @@ When athletes link Strava instead of watch, Strava strips Stryd biomechanics dat
 ---
 
 ## 🗂️ ARCHIVE - Completed Work
+
+> **📚 See `ARCHIVE_DETAILED.md` for full implementation details, code snippets, and debugging notes.**
 
 ### Phase 1: Foundation (Oct 2025) ✅
 - 100% weather coverage via 6-attempt cascade
@@ -1025,6 +1432,54 @@ When athletes link Strava instead of watch, Strava strips Stryd biomechanics dat
   - Lines 4334-4348: Vertical lines in monotony/strain graph
   - UI placeholder at line 2377
 
+### Phase 2X: Conditional Tooltip Display (Dec 28, 2025) ✅
+- **Problem Solved** - Red triangle tooltip indicators appeared on all questionnaire labels, even those without descriptions
+- **Solution Implemented:**
+  - Modified `scale_with_tooltip()` function (lines 2273-2302)
+  - Triangle only renders when `tooltip_text` parameter is non-empty
+  - Empty string or no argument = no triangle displayed
+- **Current State:**
+  - RPE scale: Has full CR-10 description → triangle shows
+  - All other fields: Empty placeholders → no triangle (cleaner UI)
+- **Code Changes (supabase_shiny.py):**
+  - Lines 2285-2293: Conditional rendering of tooltip trigger span
+  - Uses list-based label children construction
+- **Deployed:** Live on production
+
+### Phase 2Y: Monotony/Strain Overlay on Zone Graph (Dec 29, 2025) ✅
+- **Feature** - Replaced separate Monotony/Strain graph with overlay on "Zones d'allure" graph
+- **UI Changes:**
+  - Added "Monotonie" checkbox → purple dotted line on secondary Y-axis
+  - Added "Strain" checkbox → red dash-dot line on tertiary Y-axis
+  - Both toggles independent (can show one, both, or neither)
+  - Removed separate monotony/strain graph section and zone checkboxes
+- **Code Changes (supabase_shiny.py):**
+  - Lines ~2376-2384: `show_monotony` and `show_strain` checkboxes
+  - Lines ~4164-4205: Overlay logic fetching from `fetch_weekly_monotony_strain_from_db()`
+  - Lines ~4263-4289: `yaxis2` (Monotony) and `yaxis3` (Strain) configuration
+  - Deleted `monotony_strain_graph()` function and `monotony_zone_checkboxes` renderer
+- **Deployed:** Live on production
+
+### Phase 2Z: Personal Records Expansion (Dec 29, 2025) ✅
+- **Feature** - Expanded personal records from 7 to 15 distances with millisecond support
+- **New Distances:**
+  - Track: 400m, 800m, 1000m, 1500m, mile, 2000m, 3000m, 2000m steeple, 3000m steeple, 5000m, 10000m
+  - Road: 5km, 10km, semi-marathon, marathon
+- **Millisecond Support:**
+  - Input format: `HH:MM:SS:ms` (e.g., `3:45:12:50` = 3min 45.12sec)
+  - Database: `time_seconds` changed from INTEGER to DECIMAL(10,3)
+  - Display: Shows centiseconds when fractional (e.g., `3:45:12`)
+- **Code Changes (supabase_shiny.py):**
+  - Lines 7488-7504: DISTANCES array expanded to 15 entries
+  - Lines 7506-7528: `format_time_from_seconds()` updated for milliseconds
+  - Lines 7530-7570: `parse_time_to_seconds()` updated for 4-part format
+  - Lines 7572-7590: `calculate_pace()` distance_map expanded
+- **Database Migration:**
+  - `migrations/update_personal_records_schema.sql` created
+  - `complete_database_schema.sql` updated
+  - Migration executed in Supabase SQL Editor
+- **Deployed:** Live on production
+
 ---
 
 ## 📝 QUICK REFERENCE
@@ -1182,4 +1637,4 @@ SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem rsc
 
 **END OF DOCUMENT**
 
-*Last Updated: December 23, 2025*
+*Last Updated: January 3, 2026*

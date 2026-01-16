@@ -326,16 +326,24 @@ CREATE TABLE IF NOT EXISTS personal_records (
     athlete_id TEXT NOT NULL REFERENCES athlete(athlete_id) ON DELETE CASCADE,
     distance_type TEXT NOT NULL CHECK (
         distance_type IN (
+            '400m',
+            '800m',
             '1000m',
             '1500m',
             '1mile',
+            '2000m',
             '3000m',
+            '2000m_steeple',
+            '3000m_steeple',
             '5000m',
             '10000m',
-            'half_marathon'
+            '5km',
+            '10km',
+            'half_marathon',
+            'marathon'
         )
     ),
-    time_seconds INTEGER NOT NULL CHECK (time_seconds > 0),
+    time_seconds DECIMAL(10,3) NOT NULL CHECK (time_seconds > 0),
     record_date DATE,
     race_priority TEXT CHECK (race_priority IN ('A', 'B', 'C') OR race_priority IS NULL),
     notes TEXT,
@@ -354,7 +362,7 @@ CREATE TABLE IF NOT EXISTS personal_records_history (
     record_id UUID NOT NULL,
     athlete_id TEXT NOT NULL,
     distance_type TEXT NOT NULL,
-    time_seconds INTEGER NOT NULL,
+    time_seconds DECIMAL(10,3) NOT NULL,
     record_date DATE,
     race_priority TEXT,
     notes TEXT,
@@ -729,24 +737,36 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- ============================================================================
--- SECTION 8B: LACTATE TESTS TABLE
+-- SECTION 8B: LACTATE TESTS AND RACES TABLE
 -- ============================================================================
--- Manual data entry for lactate test results
+-- Manual data entry for lactate test results AND race results.
+-- Updated Jan 2026: Added test_type to distinguish lactate tests from races.
 
 CREATE TABLE IF NOT EXISTS lactate_tests (
     id SERIAL PRIMARY KEY,
     athlete_id TEXT NOT NULL,
     test_date DATE NOT NULL,
     distance_m INTEGER NOT NULL CHECK (distance_m > 0 AND distance_m <= 50000),
-    lactate_mmol DECIMAL(4,2) NOT NULL CHECK (lactate_mmol >= 0 AND lactate_mmol <= 30),
+    -- Type: 'lactate' for lactate tests, 'race' for race results
+    test_type TEXT NOT NULL DEFAULT 'lactate' CHECK (test_type IN ('lactate', 'race')),
+    -- Lactate value (required for lactate tests, NULL for races)
+    lactate_mmol DECIMAL(4,2) CHECK (lactate_mmol >= 0 AND lactate_mmol <= 30),
+    -- Race time in seconds with decimals (only for races, e.g., 2550.55 = 42:30.55)
+    race_time_seconds DECIMAL(10,2),
     notes TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
 
     CONSTRAINT fk_lactate_athlete FOREIGN KEY (athlete_id) REFERENCES athlete(athlete_id) ON DELETE CASCADE,
-    CONSTRAINT unique_lactate_test UNIQUE(athlete_id, test_date, distance_m)
+    CONSTRAINT unique_lactate_test UNIQUE(athlete_id, test_date, distance_m),
+    -- Lactate required for lactate tests
+    CONSTRAINT chk_lactate_required CHECK (test_type != 'lactate' OR lactate_mmol IS NOT NULL),
+    -- Race time only for races
+    CONSTRAINT chk_race_time_only_for_races CHECK (test_type = 'race' OR race_time_seconds IS NULL)
 );
 
 CREATE INDEX idx_lactate_athlete_date ON lactate_tests(athlete_id, test_date DESC);
+-- Index for efficient race queries (used by race dropdown on "Résumé de période")
+CREATE INDEX idx_lactate_tests_races ON lactate_tests(athlete_id, test_type, test_date DESC) WHERE test_type = 'race';
 
 ALTER TABLE lactate_tests ENABLE ROW LEVEL SECURITY;
 
@@ -755,9 +775,11 @@ CREATE POLICY "Allow all access to lactate_tests"
     FOR ALL
     USING (true);
 
-COMMENT ON TABLE lactate_tests IS 'Manual lactate test results entered by athletes.';
-COMMENT ON COLUMN lactate_tests.distance_m IS 'Distance run in metres at time of lactate measurement.';
-COMMENT ON COLUMN lactate_tests.lactate_mmol IS 'Blood lactate concentration in mmol/L.';
+COMMENT ON TABLE lactate_tests IS 'Manual lactate test results and race results entered by athletes.';
+COMMENT ON COLUMN lactate_tests.test_type IS 'Type of entry: lactate (test) or race (competition result).';
+COMMENT ON COLUMN lactate_tests.distance_m IS 'Distance in metres (for lactate: at measurement; for race: race distance).';
+COMMENT ON COLUMN lactate_tests.lactate_mmol IS 'Blood lactate concentration in mmol/L (only for lactate tests).';
+COMMENT ON COLUMN lactate_tests.race_time_seconds IS 'Race finish time in seconds with decimals (only for races).';
 
 -- ============================================================================
 -- SECTION 9: ACTIVITY ZONE TIME TABLE (Phase 2S - Incremental Calculation)
