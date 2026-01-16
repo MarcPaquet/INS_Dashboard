@@ -2,8 +2,8 @@
 
 **Project:** Intervals.icu → Supabase Data Ingestion System
 **Team:** Saint-Laurent Sélect Running Club
-**Last Updated:** January 16, 2026 (Phase 3B - Lactate/Race Toggle + Race Visualization)
-**Status:** ✅ **PRODUCTION LIVE** - https://insquebec-sportsciences.shinyapps.io/saintlaurentselect_dashboard/
+**Last Updated:** January 16, 2026 (CRASH DEBUGGING SESSION)
+**Status:** ❌ **PRODUCTION DOWN** - App crashes after login, needs database rollback
 
 ---
 
@@ -181,13 +181,13 @@ Better Training Decisions
 
 ## 📍 CURRENT STATE
 
-### ✅ What's Working (Production)
+### 🔴 PRODUCTION DOWN - CRASH AFTER LOGIN
 
 | Component | Status | Details |
 |-----------|--------|---------|
-| **Dashboard** | ✅ LIVE | https://insquebec-sportsciences.shinyapps.io/saintlaurentselect_dashboard/ |
-| **Database** | ✅ Active | Supabase project: `vqcqqfddgnvhcrxcaxjf` |
-| **Authentication** | ✅ Working | 6 users (5 athletes + 1 coach) |
+| **Dashboard** | ❌ CRASHING | Disconnects ~2 seconds after login |
+| **Database** | ⚠️ Unknown | May have RLS/permission issues |
+| **Authentication** | ✅ Working | Login modal works, crash happens after |
 | **Ingestion Script** | ✅ Validated | Tested Nov 29, 2025 - all checks passed |
 | **Mobile Design** | ✅ Responsive | All breakpoints working |
 
@@ -201,13 +201,144 @@ Better Training Decisions
 | Weather Coverage | 100% (outdoor activities) |
 | HR Coverage | 100% (when monitor used) |
 
-### 🔧 Recent Session (Jan 16, 2026)
+### 🔧 Recent Session (Jan 16, 2026) - CRITICAL ISSUE
 
-**Phase 3B: Lactate/Race Toggle + Race Visualization - DEPLOYED**
+**🚨 PRODUCTION CRASH - NEEDS DEBUGGING**
 
-Implemented three features: lactate/race toggle in form, coach questionnaire investigation (confirmed by-design), and race visualization on summary graphs.
+App crashes with "Disconnected from the server" approximately 2 seconds after any user logs in. This started after deploying Phase 3B features and running security migrations.
 
-**What Was Done:**
+---
+
+## TROUBLESHOOTING SUMMARY (For Next Session)
+
+### What Happened (Timeline)
+
+1. **Phase 3B Features Implemented** (commits 699c370, b0a3263, 299c1cc):
+   - Lactate/Race toggle in form
+   - Race visualization with markers on graphs
+   - All code committed to GitHub
+
+2. **Migrations Run by User:**
+   - ✅ `add_lactate_test_type.sql` - Added test_type and race_time columns to lactate_tests
+   - ✅ `fix_security_issues.sql` - RLS policies and function search_path changes
+
+3. **Crash Started:** App disconnects ~2 seconds after login for ANY user
+
+### Troubleshooting Steps Attempted
+
+| Step | Action | Result |
+|------|--------|--------|
+| 1 | Added try-except around race selector code | Still crashes |
+| 2 | Simplified race_selector_dropdown to return static message | Still crashes |
+| 3 | Rolled back to pre-race code (commit 9c31d1c) | Still crashes |
+| 4 | Ran `rollback_security_issues.sql` (drop blocking policies) | Still crashes |
+| 5 | Ran `rollback_security_v2.sql` (DISABLE RLS entirely) | Still crashes |
+| 6 | Deployed Dec 23 version (9c31d1c) without race features | Still crashes |
+
+### Key Finding
+
+**The crash persists even with old code that was definitely working before.**
+
+This means the issue is NOT the new race feature code - it's something in the database or environment.
+
+### SQL Migrations Run Today
+
+**1. `add_lactate_test_type.sql`:**
+```sql
+ALTER TABLE lactate_tests ADD COLUMN test_type TEXT NOT NULL DEFAULT 'lactate';
+ALTER TABLE lactate_tests ADD COLUMN race_time_seconds DECIMAL(10,2) NULL;
+ALTER TABLE lactate_tests ALTER COLUMN lactate_mmol DROP NOT NULL;
+-- Plus constraints and index
+```
+
+**2. `fix_security_issues.sql`:**
+```sql
+-- Enabled RLS on activity_zone_time and weekly_monotony_strain
+-- Created blocking policies with USING(false) on 3 tables
+-- Set search_path = '' on 10 functions
+-- Revoked SELECT on materialized views from anon/authenticated
+```
+
+**3. Rollback Attempts:**
+```sql
+-- rollback_security_v2.sql (RUN):
+DROP POLICY IF EXISTS "Block direct API access to activity_zone_time" ON activity_zone_time;
+DROP POLICY IF EXISTS "Block direct API access to weekly_monotony_strain" ON weekly_monotony_strain;
+DROP POLICY IF EXISTS "Block direct API access to lactate_tests" ON lactate_tests;
+ALTER TABLE activity_zone_time DISABLE ROW LEVEL SECURITY;
+ALTER TABLE weekly_monotony_strain DISABLE ROW LEVEL SECURITY;
+ALTER TABLE lactate_tests DISABLE ROW LEVEL SECURITY;
+GRANT SELECT ON activity_pace_zones TO anon, authenticated, service_role;
+GRANT SELECT ON weekly_zone_time TO anon, authenticated, service_role;
+```
+
+### Current State
+
+| Item | State |
+|------|-------|
+| **Git branch** | main |
+| **Deployed code** | Dec 23 version (9c31d1c) - OLD version without race features |
+| **Local supabase_shiny.py** | Dec 23 version (checked out from 9c31d1c) |
+| **Race feature code** | Saved in commits 699c370, b0a3263, 299c1cc |
+| **Database** | Has new columns from add_lactate_test_type.sql |
+| **RLS** | Disabled on activity_zone_time, weekly_monotony_strain, lactate_tests |
+
+### Files Created During Troubleshooting
+
+| File | Purpose |
+|------|---------|
+| `migrations/fix_security_issues.sql` | Original security migration (caused issues) |
+| `migrations/rollback_security_issues.sql` | First rollback attempt |
+| `migrations/rollback_security_v2.sql` | Aggressive rollback (DISABLE RLS) |
+
+### Next Session: Investigation Plan
+
+1. **Check Supabase Dashboard:**
+   - Look at database logs for errors
+   - Check if any queries are failing
+   - Verify table permissions in Auth settings
+
+2. **Test Database Connection:**
+   - Run simple SELECT queries in Supabase SQL Editor
+   - Verify service_role key still works
+   - Check if any tables are inaccessible
+
+3. **Check Function Search Paths:**
+   - The security migration set `search_path = ''` on 10 functions
+   - This might break function calls that don't use schema-qualified names
+   - May need to revert: `ALTER FUNCTION xxx RESET search_path;`
+
+4. **Verify All Tables Accessible:**
+   ```sql
+   SELECT 'activity_metadata' as t, COUNT(*) FROM activity_metadata
+   UNION ALL SELECT 'activity', COUNT(*) FROM activity
+   UNION ALL SELECT 'wellness', COUNT(*) FROM wellness
+   UNION ALL SELECT 'athlete', COUNT(*) FROM athlete
+   UNION ALL SELECT 'users', COUNT(*) FROM users;
+   ```
+
+5. **Check ShinyApps.io Logs:**
+   - Go to shinyapps.io dashboard → Logs
+   - Look for Python errors/exceptions
+
+6. **If All Else Fails:**
+   - Consider restoring Supabase to a point-in-time backup (if available)
+   - Or manually undo ALL changes from fix_security_issues.sql
+
+### Commands to Restore Race Features (After Fix)
+
+```bash
+# Restore the race feature code
+git checkout 299c1cc -- supabase_shiny.py
+
+# Or restore from stash (if still available)
+git stash list
+git stash pop
+```
+
+---
+
+## Phase 3B Features (IMPLEMENTED BUT NOT DEPLOYED DUE TO CRASH)
 
 **Feature 1: Lactate Test vs Race Toggle**
 - ✅ Created database migration: `migrations/add_lactate_test_type.sql`
@@ -233,9 +364,7 @@ Implemented three features: lactate/race toggle in form, coach questionnaire inv
 - ✅ "Simuler une date alternative" checkbox with date picker
 - ✅ Purple dashed markers for simulated race position
 
-**Deployment:**
-- ✅ Committed to GitHub: `699c370`
-- ✅ Deployed to ShinyApps.io production
+**Code Location:** Commits 699c370, b0a3263, 299c1cc on main branch
 
 **Files Modified:**
 | File | Changes |
@@ -243,8 +372,6 @@ Implemented three features: lactate/race toggle in form, coach questionnaire inv
 | `supabase_shiny.py` | +620 lines: form UI, conditional fields, race selector, graph markers |
 | `complete_database_schema.sql` | Updated lactate_tests table with new columns |
 | `migrations/add_lactate_test_type.sql` | NEW - Database migration |
-
-**⚠️ MIGRATION REQUIRED:** Run `add_lactate_test_type.sql` in Supabase SQL Editor before using race features.
 
 ---
 
