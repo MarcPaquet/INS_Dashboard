@@ -2,7 +2,7 @@
 
 **Project:** Intervals.icu → Supabase Data Ingestion System
 **Team:** Saint-Laurent Sélect Running Club
-**Last Updated:** January 16, 2026 (AWS Setup Session)
+**Last Updated:** January 16, 2026 (Phase 3B - Lactate/Race Toggle + Race Visualization)
 **Status:** ✅ **PRODUCTION LIVE** - https://insquebec-sportsciences.shinyapps.io/saintlaurentselect_dashboard/
 
 ---
@@ -202,6 +202,53 @@ Better Training Decisions
 | HR Coverage | 100% (when monitor used) |
 
 ### 🔧 Recent Session (Jan 16, 2026)
+
+**Phase 3B: Lactate/Race Toggle + Race Visualization - DEPLOYED**
+
+Implemented three features: lactate/race toggle in form, coach questionnaire investigation (confirmed by-design), and race visualization on summary graphs.
+
+**What Was Done:**
+
+**Feature 1: Lactate Test vs Race Toggle**
+- ✅ Created database migration: `migrations/add_lactate_test_type.sql`
+- ✅ Added `test_type` column ('lactate' or 'race') with check constraint
+- ✅ Added `race_time_seconds` column (DECIMAL(10,2)) for race times
+- ✅ Made `lactate_mmol` nullable (only required for lactate tests)
+- ✅ Form now shows radio buttons to choose test type
+- ✅ Conditional fields: lactate input or race time based on selection
+- ✅ Results table shows type badge (gold for race, blue for lactate)
+- ✅ Created partial index for efficient race queries
+
+**Feature 2: Coach Questionnaire**
+- ✅ Investigated why coach Kerrian couldn't submit questionnaires
+- ✅ Confirmed this is BY DESIGN for data authenticity
+- ✅ Coaches see "Les questionnaires sont réservés aux athlètes"
+- ✅ No code changes needed - inform Kerrian this is expected behavior
+
+**Feature 3: Race Visualization on "Résumé de période"**
+- ✅ Added `get_athlete_races()` helper function with caching
+- ✅ Added `get_race_by_id()` helper function
+- ✅ Race selector dropdown showing all races ever recorded
+- ✅ Gold vertical line markers on CTL/ATL and zone graphs
+- ✅ "Simuler une date alternative" checkbox with date picker
+- ✅ Purple dashed markers for simulated race position
+
+**Deployment:**
+- ✅ Committed to GitHub: `699c370`
+- ✅ Deployed to ShinyApps.io production
+
+**Files Modified:**
+| File | Changes |
+|------|---------|
+| `supabase_shiny.py` | +620 lines: form UI, conditional fields, race selector, graph markers |
+| `complete_database_schema.sql` | Updated lactate_tests table with new columns |
+| `migrations/add_lactate_test_type.sql` | NEW - Database migration |
+
+**⚠️ MIGRATION REQUIRED:** Run `add_lactate_test_type.sql` in Supabase SQL Editor before using race features.
+
+---
+
+### Previous Session (Jan 16, 2026 - Morning)
 
 **AWS Infrastructure Setup - IN PROGRESS**
 
@@ -1479,6 +1526,52 @@ When athletes link Strava instead of watch, Strava strips Stryd biomechanics dat
   - `complete_database_schema.sql` updated
   - Migration executed in Supabase SQL Editor
 - **Deployed:** Live on production
+
+### Phase 3A: Mobile Tab Restriction (Jan 3, 2026) ✅
+- **Feature** - Restricted mobile users to only see "Questionnaires" and "Entrée de données manuelle" tabs
+- **Code Changes (supabase_shiny.py):**
+  - Lines 2000-2020: CSS media query rules to hide 3 desktop-only tabs on mobile
+  - Lines 2289-2338: JavaScript enforcement logic (IIFE with tab restriction)
+- **Behavior:**
+  - Mobile users (< 768px) only see: "Questionnaires", "Entrée de données manuelle"
+  - Defaults to "Questionnaires" tab on mobile
+  - Applies to both athletes and coaches
+- **Deployed:** Live on production
+
+### Phase 3B: Lactate/Race Toggle + Race Visualization (Jan 16, 2026) ✅
+- **Feature 1: Lactate Test vs Race Toggle**
+  - Form supports both lactate tests and race results
+  - Radio buttons to switch between "Test de lactate" and "Course"
+  - Conditional fields: lactate input or race time based on type
+  - Results table shows type badge (gold for race, blue for lactate)
+- **Database Changes:**
+  - `test_type` TEXT column ('lactate' or 'race') with check constraint
+  - `race_time_seconds` DECIMAL(10,2) for race times
+  - `lactate_mmol` made nullable (only required for lactate tests)
+  - Partial index `idx_lactate_tests_races` for efficient race queries
+- **Feature 2: Coach Questionnaire Investigation**
+  - Confirmed blocking is BY DESIGN for data authenticity
+  - Coaches see "Les questionnaires sont réservés aux athlètes"
+  - No code changes - inform Kerrian this is expected behavior
+- **Feature 3: Race Visualization on "Résumé de période"**
+  - `get_athlete_races()` helper with 15-minute cache
+  - `get_race_by_id()` helper for single race lookup
+  - Race selector dropdown showing all races ever recorded
+  - Gold vertical line markers on CTL/ATL and zone graphs
+  - "Simuler une date alternative" checkbox with date picker
+  - Purple dashed markers for simulated race position
+- **Code Changes (supabase_shiny.py):**
+  - Lines ~572-642: `get_athlete_races()` and `get_race_by_id()` functions
+  - Lines ~2544-2558: Race selector UI controls
+  - Lines ~4062-4102: `race_selector_dropdown` render function
+  - Lines ~3573-3616: Race markers in `run_duration_trend()`
+  - Lines ~4454-4499: Race markers in `zone_time_longitudinal()`
+  - Lines ~7881-7934: Updated results table with type column
+  - Lines ~7936-8025: Updated form with type toggle
+  - Lines ~8419-8439: `lactate_conditional_fields` render function
+  - Lines ~8469-8572: Updated submission handler
+- **Migration Required:** `migrations/add_lactate_test_type.sql`
+- **Deployed:** Live on production (commit `699c370`)
 
 ---
 
