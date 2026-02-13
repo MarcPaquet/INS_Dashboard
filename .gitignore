@@ -42,6 +42,9 @@ athletes.json
 # Claude Code local settings
 .claude/
 
+# MCP config (contains API keys)
+.mcp.json
+
 # Local utility scripts (keep locally, not in git)
 scripts/
 tests/
@@ -53,6 +56,10 @@ intervals_wellness_to_supabase.py
 # Local documentation
 ARCHIVE_DETAILED.md
 DIAGRAM_CONTEXT.md
+
+# Lambda deployment artifacts (pip packages + zip)
+lambda/package/
+lambda/*.zip
 
 # Deployment cache
 rsconnect-python/

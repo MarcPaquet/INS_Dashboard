@@ -2,8 +2,34 @@
 Authentication utilities for INS Dashboard.
 
 Provides password hashing and verification using bcrypt.
+Also provides fast password prefix generation for O(1) user lookup.
 """
 import bcrypt
+import hashlib
+
+
+def generate_password_prefix(plain_password: str) -> str:
+    """
+    Generate a fast-lookup prefix from a password using SHA256.
+
+    This prefix is used for O(1) database lookup before the expensive
+    bcrypt verification. The prefix is NOT secure for password storage
+    alone - it must be used alongside bcrypt.
+
+    Args:
+        plain_password: The plain text password
+
+    Returns:
+        First 16 characters of SHA256 hash (64-bit equivalent)
+
+    Example:
+        >>> prefix = generate_password_prefix("MyPassword")
+        >>> len(prefix)
+        16
+    """
+    password_bytes = plain_password.encode('utf-8')
+    sha256_hash = hashlib.sha256(password_bytes).hexdigest()
+    return sha256_hash[:16]
 
 
 def hash_password(plain_password: str) -> str:

@@ -6,7 +6,7 @@
 -- Team: Saint-Laurent Sélect Running Club
 -- Database: PostgreSQL via Supabase
 -- Target Project: vqcqqfddgnvhcrxcaxjf
--- Last Updated: December 23, 2025
+-- Last Updated: February 8, 2026
 --
 -- This file contains the complete database schema for deploying to a new
 -- Supabase account. It includes:
@@ -14,7 +14,8 @@
 --     activity_intervals, wellness
 --   - Feature tables (Phase 2): personal_records, personal_records_history,
 --     athlete_training_zones, daily_workout_surveys, weekly_wellness_surveys,
---     lactate_tests, activity_zone_time, weekly_monotony_strain
+--     lactate_tests, activity_zone_time, weekly_monotony_strain,
+--     workout_pain_entries, sync_log
 --   - Materialized views: activity_pace_zones, weekly_zone_time
 --   - All indexes and constraints
 --   - RLS policies
@@ -574,8 +575,9 @@ CREATE TABLE IF NOT EXISTS daily_workout_surveys (
     -- S3: Pain/discomfort (OSLO-style branching)
     douleur_oui BOOLEAN NOT NULL DEFAULT FALSE,
     douleur_intensite INTEGER CHECK (douleur_intensite >= 0 AND douleur_intensite <= 10),
-    douleur_type_zone TEXT,
+    douleur_type_zone TEXT,  -- deprecated: replaced by workout_pain_entries table
     douleur_impact BOOLEAN,
+    capacite_execution INTEGER CHECK (capacite_execution IS NULL OR (capacite_execution >= 0 AND capacite_execution <= 3)),
 
     -- S4: Context
     en_groupe BOOLEAN NOT NULL DEFAULT FALSE,
@@ -601,6 +603,34 @@ ALTER TABLE daily_workout_surveys ENABLE ROW LEVEL SECURITY;
 
 COMMENT ON TABLE daily_workout_surveys IS 'Post-workout questionnaire responses (RPE, goal achievement, pain, context)';
 COMMENT ON COLUMN daily_workout_surveys.rpe_cr10 IS 'Rate of Perceived Exertion (CR10: 0=nothing, 10=maximal)';
+COMMENT ON COLUMN daily_workout_surveys.capacite_execution IS 'Training execution capacity: 0=not completed, 1=severely limited, 2=partially limited, 3=full capacity';
+
+-- ============================================================================
+-- SECTION 6B: Workout Pain Entries (structured body picker data)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS workout_pain_entries (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    survey_id UUID NOT NULL REFERENCES daily_workout_surveys(id) ON DELETE CASCADE,
+    body_part TEXT NOT NULL,
+    body_view TEXT NOT NULL CHECK (body_view IN ('front', 'back')),
+    severity INTEGER NOT NULL CHECK (severity >= 1 AND severity <= 3),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pain_entries_survey ON workout_pain_entries(survey_id);
+
+ALTER TABLE workout_pain_entries ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow all access to workout_pain_entries"
+    ON workout_pain_entries
+    FOR ALL
+    USING (true);
+
+COMMENT ON TABLE workout_pain_entries IS 'Structured pain data from body picker: one row per selected body part per survey.';
+COMMENT ON COLUMN workout_pain_entries.body_part IS 'Body part ID: head, neck, left_knee, right_calf, etc.';
+COMMENT ON COLUMN workout_pain_entries.body_view IS 'Which SVG view the part belongs to: front or back.';
+COMMENT ON COLUMN workout_pain_entries.severity IS 'Pain level 1-3: 1=légère (inconfort), 2=modérée (douleur), 3=sévère (blessure).';
 
 -- ============================================================================
 -- SECTION 7: MIGRATION 6 - Weekly Wellness Surveys
@@ -737,36 +767,57 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- ============================================================================
--- SECTION 8B: LACTATE TESTS AND RACES TABLE
+-- SECTION 8B: EVENTS TABLE (LACTATE TESTS, RACES, AND INJURIES)
 -- ============================================================================
--- Manual data entry for lactate test results AND race results.
+-- Manual data entry for athlete events: lactate tests, race results, and injuries/pain.
 -- Updated Jan 2026: Added test_type to distinguish lactate tests from races.
+-- Updated Feb 2026: Added injury/pain tracking with body location and severity.
 
 CREATE TABLE IF NOT EXISTS lactate_tests (
     id SERIAL PRIMARY KEY,
     athlete_id TEXT NOT NULL,
     test_date DATE NOT NULL,
-    distance_m INTEGER NOT NULL CHECK (distance_m > 0 AND distance_m <= 50000),
-    -- Type: 'lactate' for lactate tests, 'race' for race results
-    test_type TEXT NOT NULL DEFAULT 'lactate' CHECK (test_type IN ('lactate', 'race')),
-    -- Lactate value (required for lactate tests, NULL for races)
-    lactate_mmol DECIMAL(4,2) CHECK (lactate_mmol >= 0 AND lactate_mmol <= 30),
-    -- Race time in seconds with decimals (only for races, e.g., 2550.55 = 42:30.55)
+    -- Distance (required for lactate/race, NULL for injuries)
+    distance_m INTEGER CHECK (distance_m IS NULL OR (distance_m > 0 AND distance_m <= 50000)),
+    -- Type: 'lactate' for lactate tests, 'race' for race results, 'injury' for pain/injuries, 'speed_test' for max speed tests
+    test_type TEXT NOT NULL DEFAULT 'lactate' CHECK (test_type IN ('lactate', 'race', 'injury', 'speed_test')),
+    -- Lactate value (required for lactate tests, NULL for races/injuries/speed_tests)
+    lactate_mmol DECIMAL(4,2) CHECK (lactate_mmol IS NULL OR (lactate_mmol >= 0 AND lactate_mmol <= 30)),
+    -- Race time in seconds with decimals (for races and speed_tests)
     race_time_seconds DECIMAL(10,2),
+    -- Speed in m/s (only for speed_tests, auto-calculated from distance/time)
+    speed_ms DECIMAL(6,3),
+    -- Injury fields (only for injuries)
+    injury_location TEXT,  -- Body part ID: 'left_knee', 'right_calf', etc.
+    injury_severity INTEGER CHECK (injury_severity IS NULL OR (injury_severity >= 1 AND injury_severity <= 3)),
+    injury_status TEXT CHECK (injury_status IS NULL OR injury_status IN ('active', 'recovering', 'resolved')),
     notes TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
 
     CONSTRAINT fk_lactate_athlete FOREIGN KEY (athlete_id) REFERENCES athlete(athlete_id) ON DELETE CASCADE,
-    CONSTRAINT unique_lactate_test UNIQUE(athlete_id, test_date, distance_m),
     -- Lactate required for lactate tests
     CONSTRAINT chk_lactate_required CHECK (test_type != 'lactate' OR lactate_mmol IS NOT NULL),
-    -- Race time only for races
-    CONSTRAINT chk_race_time_only_for_races CHECK (test_type = 'race' OR race_time_seconds IS NULL)
+    -- Distance required for lactate/race/speed_test (not injury)
+    CONSTRAINT chk_distance_required CHECK (test_type = 'injury' OR distance_m IS NOT NULL),
+    -- Race time for races and speed_tests
+    CONSTRAINT chk_race_time_only_for_races CHECK (test_type IN ('race', 'speed_test') OR race_time_seconds IS NULL),
+    -- Speed only for speed_tests
+    CONSTRAINT chk_speed_only_for_speed_tests CHECK (test_type = 'speed_test' OR speed_ms IS NULL),
+    -- Injury fields required for injuries
+    CONSTRAINT chk_injury_location_required CHECK (test_type != 'injury' OR injury_location IS NOT NULL),
+    CONSTRAINT chk_injury_severity_required CHECK (test_type != 'injury' OR injury_severity IS NOT NULL),
+    CONSTRAINT chk_injury_status_required CHECK (test_type != 'injury' OR injury_status IS NOT NULL),
+    -- Injury fields only for injuries
+    CONSTRAINT chk_injury_fields_only_for_injuries CHECK (test_type = 'injury' OR (injury_location IS NULL AND injury_severity IS NULL AND injury_status IS NULL))
 );
 
 CREATE INDEX idx_lactate_athlete_date ON lactate_tests(athlete_id, test_date DESC);
 -- Index for efficient race queries (used by race dropdown on "Résumé de période")
 CREATE INDEX idx_lactate_tests_races ON lactate_tests(athlete_id, test_type, test_date DESC) WHERE test_type = 'race';
+-- Index for efficient injury queries
+CREATE INDEX idx_lactate_tests_injuries ON lactate_tests(athlete_id, test_type, test_date DESC) WHERE test_type = 'injury';
+-- Index for efficient speed test queries
+CREATE INDEX idx_lactate_tests_speed ON lactate_tests(athlete_id, test_type, test_date DESC) WHERE test_type = 'speed_test';
 
 ALTER TABLE lactate_tests ENABLE ROW LEVEL SECURITY;
 
@@ -775,11 +826,22 @@ CREATE POLICY "Allow all access to lactate_tests"
     FOR ALL
     USING (true);
 
-COMMENT ON TABLE lactate_tests IS 'Manual lactate test results and race results entered by athletes.';
-COMMENT ON COLUMN lactate_tests.test_type IS 'Type of entry: lactate (test) or race (competition result).';
-COMMENT ON COLUMN lactate_tests.distance_m IS 'Distance in metres (for lactate: at measurement; for race: race distance).';
+COMMENT ON TABLE lactate_tests IS 'Events: lactate tests, race results, injuries, and speed tests entered by athletes.';
+COMMENT ON COLUMN lactate_tests.test_type IS 'Type of entry: lactate (test), race (competition), injury (pain/blessure), or speed_test (max speed).';
+COMMENT ON COLUMN lactate_tests.distance_m IS 'Distance in metres (for lactate/race/speed_test, NULL for injuries).';
 COMMENT ON COLUMN lactate_tests.lactate_mmol IS 'Blood lactate concentration in mmol/L (only for lactate tests).';
-COMMENT ON COLUMN lactate_tests.race_time_seconds IS 'Race finish time in seconds with decimals (only for races).';
+COMMENT ON COLUMN lactate_tests.race_time_seconds IS 'Time in seconds with decimals (for races and speed tests).';
+COMMENT ON COLUMN lactate_tests.speed_ms IS 'Speed in m/s, auto-calculated from distance/time (only for speed_tests).';
+COMMENT ON COLUMN lactate_tests.injury_location IS 'Body part ID: head, neck, left_knee, right_calf, etc. (only for injuries).';
+COMMENT ON COLUMN lactate_tests.injury_severity IS 'Pain level 1-3: 1=légère, 2=modérée, 3=sévère (only for injuries).';
+COMMENT ON COLUMN lactate_tests.injury_status IS 'Status: active, recovering, resolved (only for injuries).';
+
+-- Body part reference for injury_location:
+-- Upper: head, neck, left_shoulder, right_shoulder, left_arm, right_arm, chest
+-- Core: upper_back, lower_back
+-- Lower: left_hip, right_hip, left_thigh, right_thigh, left_knee, right_knee,
+--        left_calf, right_calf, left_shin, right_shin, left_ankle, right_ankle,
+--        left_foot, right_foot, other
 
 -- ============================================================================
 -- SECTION 9: ACTIVITY ZONE TIME TABLE (Phase 2S - Incremental Calculation)

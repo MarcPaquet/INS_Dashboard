@@ -5,6 +5,7 @@ import traceback
 from shiny import App, ui
 
 try:
+    # Use the full dashboard app
     from supabase_shiny import app
 except Exception as e:
     error_msg = str(e)

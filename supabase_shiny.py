@@ -11,6 +11,7 @@ Interactive Shiny dashboard for visualizing training metrics including:
 Stack: Shiny for Python, Plotly, Supabase PostgreSQL
 """
 from __future__ import annotations
+import json
 import os
 import time
 import traceback
@@ -25,13 +26,14 @@ from dotenv import load_dotenv
 import plotly.graph_objects as go
 
 from shiny import App, ui, render, reactive
-from shinywidgets import output_widget, render_plotly
+# shinywidgets crashes on ShinyApps.io - using Plotly HTML rendering instead
+# from shinywidgets import output_widget, render_plotly
 
 # Import algorithme temps actif (Strava-like)
 from moving_time import compute_moving_time_strava
 
 # Import authentication utilities
-from auth_utils import verify_password
+from auth_utils import verify_password, generate_password_prefix
 
 
 # ========== Performance Monitoring ==========
@@ -135,8 +137,12 @@ print(f"[DEBUG] SUPABASE_KEY set: {bool(SUPABASE_KEY)}")
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError(f"SUPABASE_URL et SUPABASE_SERVICE_ROLE_KEY (ou ANON) doivent être définis. script_dir={script_dir}, files={os.listdir(script_dir)}")
 
-# Fuseau horaire local pour l’agrégation hebdo
-LOCAL_TZ = os.getenv("INS_TZ", "America/Toronto")  # fuseau horaire local pour l’agrégation hebdo
+# Fuseau horaire local pour l'agrégation hebdo
+LOCAL_TZ = os.getenv("INS_TZ", "America/Toronto")  # fuseau horaire local pour l'agrégation hebdo
+
+# Lambda Function URL for manual refresh (optional - button hidden if not set)
+LAMBDA_FUNCTION_URL = os.getenv("LAMBDA_FUNCTION_URL", "")
+LAMBDA_REFRESH_TOKEN = os.getenv("LAMBDA_REFRESH_TOKEN", "")
 
 _sess = requests.Session()
 _sess.headers.update({"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"})
@@ -559,6 +565,87 @@ def get_zone_changes_in_range(athlete_id: str, start_date: date, end_date: date)
 
     _zone_changes_cache[cache_key] = (now, result)
     return result
+
+
+# =====================================================
+# RACE HELPER FUNCTIONS
+# =====================================================
+
+_races_cache = {}
+_RACES_CACHE_TTL = 300  # 5 minutes cache for races
+
+
+def get_athlete_races(athlete_id: str) -> list[dict]:
+    """
+    Fetch all races for an athlete (test_type='race'), ordered by date descending.
+    Used for the race selector dropdown on "Résumé de période".
+    """
+    import time as _time
+    now = _time.time()
+
+    # Check cache
+    cache_key = f"races_{athlete_id}"
+    if cache_key in _races_cache:
+        cached_time, cached_result = _races_cache[cache_key]
+        if now - cached_time < _RACES_CACHE_TTL:
+            return cached_result
+
+    # Query races from lactate_tests table
+    params = {
+        "athlete_id": f"eq.{athlete_id}",
+        "test_type": "eq.race",
+        "order": "test_date.desc"
+    }
+
+    try:
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/lactate_tests",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+            },
+            params=params
+        )
+        if response.status_code == 200:
+            races = response.json()
+            _races_cache[cache_key] = (now, races)
+            return races
+        else:
+            print(f"Error fetching races: {response.text}")
+            return []
+    except Exception as e:
+        print(f"Error fetching races: {e}")
+        return []
+
+
+def get_race_by_id(race_id: int) -> dict | None:
+    """Fetch a single race by its ID."""
+    try:
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/lactate_tests",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+            },
+            params={"id": f"eq.{race_id}"}
+        )
+        if response.status_code == 200:
+            results = response.json()
+            return results[0] if results else None
+        return None
+    except Exception as e:
+        print(f"Error fetching race by id: {e}")
+        return None
+
+
+def invalidate_races_cache(athlete_id: str = None):
+    """Invalidate races cache for an athlete or all athletes."""
+    if athlete_id:
+        cache_key = f"races_{athlete_id}"
+        if cache_key in _races_cache:
+            del _races_cache[cache_key]
+    else:
+        _races_cache.clear()
 
 
 @timing_decorator
@@ -1286,6 +1373,20 @@ def _create_empty_plotly_fig(msg: str, height: int = 480) -> go.Figure:
                       plot_bgcolor="white", height=height)
     return fig
 
+def _create_error_plotly_fig(error_msg: str, height: int = 480) -> go.Figure:
+    """Create error Plotly figure with red message for debugging."""
+    fig = go.Figure()
+    fig.add_annotation(
+        text=f"ERREUR: {error_msg[:200]}",  # Truncate long errors
+        xref="paper", yref="paper", x=0.5, y=0.5,
+        showarrow=False, font=dict(size=12, color="#dc2626")
+    )
+    fig.update_layout(
+        xaxis=dict(visible=False), yaxis=dict(visible=False),
+        plot_bgcolor="#fee", height=height
+    )
+    return fig
+
 # ========== Préparation XY selon choix X/Y ==========
 def _prep_xy(df: pd.DataFrame, xvar: str, yvar: str, activity_type: str = "run", smooth_win: int = 21):
     """Optimized XY preparation using pre-computed columns from cache."""
@@ -1445,7 +1546,6 @@ login_modal = ui.modal(
                         e.preventDefault();
                         var password = $(this).val();
                         if (password && password.length > 0) {
-                            // Small delay to ensure Shiny processes the input value
                             setTimeout(function() {
                                 $('#login_submit').click();
                             }, 50);
@@ -1968,17 +2068,39 @@ app_ui = ui.page_fluid(
       }
       
       .user-info-container .btn {
-        font-size: 1.2rem !important;
-        padding: 0.7rem 1.5rem !important;
+        font-size: 1rem !important;
+        padding: 0.5rem 1rem !important;
         font-weight: 600;
-        border-radius: 10px;
-        transition: all 0.3s ease;
-        border: 2px solid #dc2626 !important;
+        border-radius: 8px;
+        transition: all 0.2s ease;
       }
-      
-      .user-info-container .btn:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 12px rgba(220, 38, 38, 0.3);
+
+      .user-info-container .btn-primary {
+        background-color: #3b82f6;
+        border: none !important;
+        color: white;
+      }
+
+      .user-info-container .btn-primary:hover {
+        background-color: #2563eb;
+        transform: translateY(-1px);
+        box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+      }
+
+      .user-info-container .btn-light {
+        background-color: #f3f4f6;
+        border: none !important;
+        color: #374151;
+      }
+
+      .user-info-container .btn-light:hover {
+        background-color: #e5e7eb;
+        transform: translateY(-1px);
+      }
+
+      .user-info-container .btn:focus {
+        outline: none !important;
+        box-shadow: none !important;
       }
       
       /* Responsive design - Progressive stacking for better readability */
@@ -1996,6 +2118,28 @@ app_ui = ui.page_fluid(
       @media (max-width: 768px) {
         .summary-grid-full { grid-template-columns: 1fr; }
         h2 { font-size: 1.8rem; }
+
+        /* === MOBILE TAB RESTRICTION === */
+        /* Hide desktop-only tab buttons */
+        #tabs .nav-tabs .nav-item:has([data-value="Résumé de période"]),
+        #tabs .nav-tabs .nav-item:has([data-value="Analyse de séance"]),
+        #tabs .nav-tabs .nav-item:has([data-value="Comparaison de séances"]) {
+          display: none !important;
+        }
+
+        /* Fallback for browsers without :has() support */
+        .nav-link[data-value="Résumé de période"],
+        .nav-link[data-value="Analyse de séance"],
+        .nav-link[data-value="Comparaison de séances"] {
+          display: none !important;
+        }
+
+        /* Hide content panels for hidden tabs */
+        .tab-pane[data-value="Résumé de période"],
+        .tab-pane[data-value="Analyse de séance"],
+        .tab-pane[data-value="Comparaison de séances"] {
+          display: none !important;
+        }
       }
       
       /* Animations */
@@ -2114,6 +2258,8 @@ app_ui = ui.page_fluid(
     """),
     # Load flatpickr CSS
     ui.tags.link(rel="stylesheet", href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css"),
+    # Load Font Awesome for icons
+    ui.tags.link(rel="stylesheet", href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"),
     # Load flatpickr JS
     ui.tags.script(src="https://cdn.jsdelivr.net/npm/flatpickr"),
     # Load flatpickr French locale
@@ -2263,6 +2409,57 @@ app_ui = ui.page_fluid(
             $(document).on('shown.bs.tab', function(e) {
                 setTimeout(resizePlotlyCharts, 100);
             });
+
+            // === MOBILE TAB RESTRICTION ===
+            (function() {
+                var MOBILE_BREAKPOINT = 768;
+                var ALLOWED_TABS = ['Questionnaires', 'Entrée de données manuelle'];
+                var DEFAULT_TAB = 'Questionnaires';
+
+                function isMobile() {
+                    return window.innerWidth < MOBILE_BREAKPOINT;
+                }
+
+                function getCurrentTab() {
+                    var active = document.querySelector('#tabs .nav-link.active');
+                    return active ? active.getAttribute('data-value') : null;
+                }
+
+                function switchToDefault() {
+                    var tab = document.querySelector('#tabs .nav-link[data-value="' + DEFAULT_TAB + '"]');
+                    if (tab && !tab.classList.contains('active')) tab.click();
+                }
+
+                function enforce() {
+                    if (!isMobile()) return;
+                    var current = getCurrentTab();
+                    if (current && ALLOWED_TABS.indexOf(current) === -1) {
+                        switchToDefault();
+                    }
+                }
+
+                // On Shiny connect
+                $(document).on('shiny:connected', function() {
+                    setTimeout(enforce, 100);
+                });
+
+                // On window resize
+                var mobileTimer;
+                window.addEventListener('resize', function() {
+                    clearTimeout(mobileTimer);
+                    mobileTimer = setTimeout(enforce, 250);
+                });
+
+                // Block navigation to hidden tabs
+                $(document).on('show.bs.tab', function(e) {
+                    if (!isMobile()) return;
+                    var target = e.target.getAttribute('data-value');
+                    if (ALLOWED_TABS.indexOf(target) === -1) {
+                        e.preventDefault();
+                        switchToDefault();
+                    }
+                });
+            })();
         });
     """),
     # Main dashboard content (conditionally shown after authentication)
@@ -2272,26 +2469,29 @@ app_ui = ui.page_fluid(
 # ========== HELPER FUNCTIONS FOR UI ==========
 def scale_with_tooltip(label_text, input_element, tooltip_text=""):
     """
-    Creates a scale input with an informational tooltip icon.
+    Creates a scale input with an optional informational tooltip icon.
 
     Args:
         label_text: The label text for the scale
         input_element: The Shiny input element (slider, radio buttons, etc.)
-        tooltip_text: The text to display in the tooltip on hover (empty string for placeholder icons)
+        tooltip_text: The text to display in the tooltip on hover. If empty, no tooltip icon is shown.
 
     Returns:
-        A ui.div containing the label with tooltip icon and the input element
+        A ui.div containing the label (with optional tooltip icon) and the input element
     """
-    return ui.div(
-        ui.tags.label(
-            label_text,
+    # Only show the red triangle if there's tooltip text to display
+    label_children = [label_text]
+    if tooltip_text:
+        label_children.append(
             ui.tags.span(
                 "▲",
                 **{"class": "tooltip-trigger", "data-tooltip": tooltip_text}
-            ) if tooltip_text else ui.tags.span(
-                "▲",
-                **{"class": "tooltip-trigger", "data-tooltip": ""}
-            ),
+            )
+        )
+
+    return ui.div(
+        ui.tags.label(
+            *label_children,
             style="font-weight: 600; margin-bottom: 0.5rem; display: inline-flex; align-items: center;"
         ),
         input_element,
@@ -2306,7 +2506,9 @@ def dashboard_content_ui():
                 ui.h2("Dashboard - Saint-Laurent Sélect", style="margin: 0;"),
                 ui.div(
                     ui.output_ui("user_info_display"),
-                    ui.input_action_button("logout_btn", "Logout", class_="btn btn-light", style="font-weight: 600; font-size: 1.1rem;"),
+                    ui.input_action_button("refresh_data_btn", "Sync", class_="btn btn-primary", style="font-weight: 600; font-size: 1rem; padding: 0.4rem 0.8rem;"),
+                    ui.output_ui("refresh_status_display"),
+                    ui.input_action_button("logout_btn", "Logout", class_="btn btn-light", style="font-weight: 600; font-size: 1rem; padding: 0.4rem 0.8rem; border: 1px solid #d1d5db; outline: none; box-shadow: none;"),
                     class_="user-info-container",
                     style="text-align: right; justify-content: flex-end; gap: 0.5rem; display: flex; align-items: center;"
                 ),
@@ -2352,7 +2554,7 @@ def dashboard_content_ui():
                         ),
                         col_widths=[4, 4, 4],
                     ),
-                    ui.div(output_widget("run_duration_trend"), style="margin-top: 1rem;"),
+                    ui.div(ui.output_ui("run_duration_trend"), style="margin-top: 1rem;"),
                     # Zone time longitudinal graph - same section, shares CTL/ATL controls
                     ui.div(
                         ui.tags.label("Zones d'allure", style="font-weight: 600; color: #374151; margin-top: 1.5rem; margin-bottom: 0.5rem; display: block;"),
@@ -2370,30 +2572,37 @@ def dashboard_content_ui():
                                 "ACL - ATL",
                                 value=False
                             ),
+                            ui.input_checkbox(
+                                "show_monotony",
+                                "Monotonie",
+                                value=False
+                            ),
+                            ui.input_checkbox(
+                                "show_strain",
+                                "Strain",
+                                value=False
+                            ),
                             style="margin-top: 0.5rem; display: flex; align-items: center; gap: 1.5rem;"
                         ),
                         style="margin-top: 1rem;"
                     ),
-                    ui.output_ui("zone_change_banner"),
-                    ui.div(output_widget("zone_time_longitudinal"), style="margin-top: 1rem;"),
-                    # Monotony & Strain section
-                    ui.hr(style="margin: 1.5rem 0; border-color: #e5e7eb;"),
+                    # Race marker controls
                     ui.div(
-                        ui.tags.label("Monotonie / Strain (modele Carl Foster)", style="font-weight: 600; color: #374151; margin-bottom: 0.5rem; display: block;"),
-                        ui.output_ui("monotony_zone_checkboxes"),
+                        ui.tags.label("Marqueur de course", style="font-weight: 600; color: #374151; margin-top: 1.5rem; margin-bottom: 0.5rem; display: block;"),
                         ui.div(
-                            ui.input_radio_buttons(
-                                "monotony_metric",
-                                "",
-                                choices={"strain": "Strain", "monotony": "Monotonie"},
-                                selected="strain",
-                                inline=True
+                            ui.output_ui("race_selector_dropdown"),
+                            ui.input_checkbox(
+                                "show_simulated_race",
+                                "Simuler une date alternative",
+                                value=False
                             ),
-                            style="margin-top: 0.5rem;"
+                            ui.output_ui("simulated_race_date_input"),
+                            style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;"
                         ),
-                        style="margin-top: 1rem;"
+                        style="margin-top: 0.5rem; padding: 0.75rem; background: #fef3c7; border-radius: 8px; border: 1px solid #f59e0b;"
                     ),
-                    ui.div(output_widget("monotony_strain_graph"), style="margin-top: 1rem;"),
+                    ui.output_ui("zone_change_banner"),
+                    ui.div(ui.output_ui("zone_time_longitudinal"), style="margin-top: 1rem;"),
                     class_="analysis-unified"
                 ),
             ),
@@ -2406,15 +2615,16 @@ def dashboard_content_ui():
             ui.div({"class": "summary-grid-full"},
                 ui.card(
                     ui.card_header("Repartition des types (temps total)"),
-                    output_widget("pie_types"),
+                    ui.output_ui("pie_types"),
                 ),
                 ui.card(
                     ui.card_header("Allure vs Frequence cardiaque — par mois"),
-                    output_widget("pace_hr_scatter"),
+                    ui.input_checkbox("show_pace_hr_dots", "Afficher les points", value=True),
+                    ui.output_ui("pace_hr_scatter"),
                 ),
                 ui.card(
                     ui.card_header("Volume hebdomadaire"),
-                    output_widget("weekly_volume"),
+                    ui.output_ui("weekly_volume"),
                 ),
             ),
         ),
@@ -2452,7 +2662,7 @@ def dashboard_content_ui():
                         col_widths=[4, 2, 3, 3]
                     ),
                     # Plot
-                    ui.div(output_widget("plot_xy"), style="margin-top: 1rem;"),
+                    ui.div(ui.output_ui("plot_xy"), style="margin-top: 1rem;"),
                     
                     # Range selection controls
                     ui.div(
@@ -2552,7 +2762,7 @@ def dashboard_content_ui():
                         
                         # Comparison graph
                         ui.div(
-                            output_widget("comparison_plot"),
+                            ui.output_ui("comparison_plot"),
                             style="margin-top: 1.5rem;"
                         ),
                         
@@ -2619,20 +2829,186 @@ def dashboard_content_ui():
                                 ui.panel_conditional(
                                     "input.daily_douleur_oui === 'Oui'",
                                     ui.div(
-                                        scale_with_tooltip(
-                                            "Intensité de la douleur",
-                                            ui.input_slider("daily_douleur_intensite", "", min=0, max=10, value=3, step=1, width="100%"),
-                                            ""  # Placeholder - description to be added later
-                                        ),
+                                        # Dual body picker (front + back)
+                                        ui.tags.label("Zones de douleur (cliquez pour selectionner, plusieurs zones possibles)", style="font-weight: 600; margin-bottom: 0.5rem; display: block;"),
+                                        ui.HTML('''
+                                            <div id="daily-body-picker" style="display: flex; gap: 1.5rem; justify-content: center; flex-wrap: wrap; margin-bottom: 1rem;">
+                                                <style>
+                                                    .daily-bp { fill: #e5e7eb; stroke: #9ca3af; stroke-width: 1; cursor: pointer; transition: all 0.2s; }
+                                                    .daily-bp:hover { fill: #d1d5db; stroke: #6b7280; }
+                                                    .daily-bp.bp-selected { stroke-width: 2.5; }
+                                                    .daily-bp.sev-1 { fill: #86efac; stroke: #22c55e; }
+                                                    .daily-bp.sev-2 { fill: #fde047; stroke: #eab308; }
+                                                    .daily-bp.sev-3 { fill: #fca5a5; stroke: #ef4444; }
+                                                    #daily-selected-list { margin-top: 0.5rem; }
+                                                    .daily-sel-item { display: inline-flex; align-items: center; gap: 0.3rem; background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 20px; padding: 0.25rem 0.75rem; margin: 0.25rem; font-size: 0.85rem; }
+                                                    .daily-sel-item .remove-btn { cursor: pointer; color: #ef4444; font-weight: bold; margin-left: 0.25rem; }
+                                                    .daily-sel-item select { border: none; background: transparent; font-size: 0.8rem; padding: 0; }
+                                                </style>
+                                                <!-- FRONT VIEW -->
+                                                <div data-view="front" style="text-align: center;">
+                                                    <div style="font-size: 0.85rem; font-weight: 600; margin-bottom: 0.3rem; color: #555;">Vue avant</div>
+                                                    <svg viewBox="0 0 200 400" width="160" height="320" style="max-width: 100%;">
+                                                        <ellipse class="daily-bp" data-part="head" cx="100" cy="30" rx="25" ry="28"/>
+                                                        <rect class="daily-bp" data-part="neck" x="90" y="58" width="20" height="15" rx="3"/>
+                                                        <ellipse class="daily-bp" data-part="left_shoulder" cx="60" cy="85" rx="18" ry="12"/>
+                                                        <ellipse class="daily-bp" data-part="right_shoulder" cx="140" cy="85" rx="18" ry="12"/>
+                                                        <rect class="daily-bp" data-part="left_arm" x="35" y="95" width="18" height="55" rx="8"/>
+                                                        <rect class="daily-bp" data-part="right_arm" x="147" y="95" width="18" height="55" rx="8"/>
+                                                        <rect class="daily-bp" data-part="chest" x="70" y="75" width="60" height="45" rx="5"/>
+                                                        <rect class="daily-bp" data-part="abdomen" x="75" y="120" width="50" height="35" rx="3"/>
+                                                        <ellipse class="daily-bp" data-part="left_hip" cx="75" cy="165" rx="20" ry="15"/>
+                                                        <ellipse class="daily-bp" data-part="right_hip" cx="125" cy="165" rx="20" ry="15"/>
+                                                        <rect class="daily-bp" data-part="left_quad" x="60" y="178" width="28" height="60" rx="10"/>
+                                                        <rect class="daily-bp" data-part="right_quad" x="112" y="178" width="28" height="60" rx="10"/>
+                                                        <ellipse class="daily-bp" data-part="left_knee" cx="74" cy="248" rx="14" ry="12"/>
+                                                        <ellipse class="daily-bp" data-part="right_knee" cx="126" cy="248" rx="14" ry="12"/>
+                                                        <rect class="daily-bp" data-part="left_shin" x="65" y="260" width="18" height="55" rx="6"/>
+                                                        <rect class="daily-bp" data-part="right_shin" x="117" y="260" width="18" height="55" rx="6"/>
+                                                        <ellipse class="daily-bp" data-part="left_ankle" cx="74" cy="322" rx="10" ry="8"/>
+                                                        <ellipse class="daily-bp" data-part="right_ankle" cx="126" cy="322" rx="10" ry="8"/>
+                                                        <ellipse class="daily-bp" data-part="left_foot" cx="74" cy="345" rx="14" ry="20"/>
+                                                        <ellipse class="daily-bp" data-part="right_foot" cx="126" cy="345" rx="14" ry="20"/>
+                                                    </svg>
+                                                </div>
+                                                <!-- BACK VIEW -->
+                                                <div data-view="back" style="text-align: center;">
+                                                    <div style="font-size: 0.85rem; font-weight: 600; margin-bottom: 0.3rem; color: #555;">Vue arriere</div>
+                                                    <svg viewBox="0 0 200 400" width="160" height="320" style="max-width: 100%;">
+                                                        <ellipse class="daily-bp" data-part="head" cx="100" cy="30" rx="25" ry="28"/>
+                                                        <rect class="daily-bp" data-part="neck" x="90" y="58" width="20" height="15" rx="3"/>
+                                                        <ellipse class="daily-bp" data-part="left_shoulder" cx="60" cy="85" rx="18" ry="12"/>
+                                                        <ellipse class="daily-bp" data-part="right_shoulder" cx="140" cy="85" rx="18" ry="12"/>
+                                                        <rect class="daily-bp" data-part="left_arm" x="35" y="95" width="18" height="55" rx="8"/>
+                                                        <rect class="daily-bp" data-part="right_arm" x="147" y="95" width="18" height="55" rx="8"/>
+                                                        <rect class="daily-bp" data-part="upper_back" x="70" y="75" width="60" height="45" rx="5"/>
+                                                        <rect class="daily-bp" data-part="lower_back" x="75" y="120" width="50" height="35" rx="3"/>
+                                                        <ellipse class="daily-bp" data-part="left_glute" cx="75" cy="165" rx="20" ry="15"/>
+                                                        <ellipse class="daily-bp" data-part="right_glute" cx="125" cy="165" rx="20" ry="15"/>
+                                                        <rect class="daily-bp" data-part="left_hamstring" x="60" y="178" width="28" height="60" rx="10"/>
+                                                        <rect class="daily-bp" data-part="right_hamstring" x="112" y="178" width="28" height="60" rx="10"/>
+                                                        <ellipse class="daily-bp" data-part="left_knee" cx="74" cy="248" rx="14" ry="12"/>
+                                                        <ellipse class="daily-bp" data-part="right_knee" cx="126" cy="248" rx="14" ry="12"/>
+                                                        <rect class="daily-bp" data-part="left_calf" x="65" y="260" width="18" height="55" rx="6"/>
+                                                        <rect class="daily-bp" data-part="right_calf" x="117" y="260" width="18" height="55" rx="6"/>
+                                                        <ellipse class="daily-bp" data-part="left_ankle" cx="74" cy="322" rx="10" ry="8"/>
+                                                        <ellipse class="daily-bp" data-part="right_ankle" cx="126" cy="322" rx="10" ry="8"/>
+                                                        <ellipse class="daily-bp" data-part="left_foot" cx="74" cy="345" rx="14" ry="20"/>
+                                                        <ellipse class="daily-bp" data-part="right_foot" cx="126" cy="345" rx="14" ry="20"/>
+                                                    </svg>
+                                                </div>
+                                            </div>
+                                            <!-- Selected parts list -->
+                                            <div id="daily-selected-list"></div>
+                                        '''),
+                                        ui.tags.script("""
+                                            (function() {
+                                                if (window._dailyBPInitialized) return;
+                                                window._dailyBPInitialized = true;
 
+                                                const LABELS = {
+                                                    head:"Tete",neck:"Cou",left_shoulder:"Epaule G",right_shoulder:"Epaule D",
+                                                    left_arm:"Bras G",right_arm:"Bras D",chest:"Poitrine",abdomen:"Abdomen",
+                                                    upper_back:"Haut du dos",lower_back:"Bas du dos",
+                                                    left_hip:"Hanche G",right_hip:"Hanche D",
+                                                    left_quad:"Quadriceps G",right_quad:"Quadriceps D",
+                                                    left_hamstring:"Ischio-jambier G",right_hamstring:"Ischio-jambier D",
+                                                    left_glute:"Fessier G",right_glute:"Fessier D",
+                                                    left_knee:"Genou G",right_knee:"Genou D",
+                                                    left_shin:"Tibia G",right_shin:"Tibia D",
+                                                    left_calf:"Mollet G",right_calf:"Mollet D",
+                                                    left_ankle:"Cheville G",right_ankle:"Cheville D",
+                                                    left_foot:"Pied G",right_foot:"Pied D"
+                                                };
+                                                var selections = {};
+
+                                                function render() {
+                                                    document.querySelectorAll('.daily-bp').forEach(function(el) {
+                                                        var partId = el.dataset.part;
+                                                        var viewEl = el.closest('[data-view]');
+                                                        var view = viewEl ? viewEl.dataset.view : 'front';
+                                                        var key = view + ':' + partId;
+                                                        el.classList.remove('bp-selected','sev-1','sev-2','sev-3');
+                                                        if (selections[key]) {
+                                                            el.classList.add('bp-selected','sev-'+selections[key].severity);
+                                                        }
+                                                    });
+                                                    var listEl = document.getElementById('daily-selected-list');
+                                                    if (!listEl) return;
+                                                    if (Object.keys(selections).length === 0) {
+                                                        listEl.innerHTML = '<p style="color:#999;font-size:0.85rem;margin:0;">Aucune zone selectionnee</p>';
+                                                    } else {
+                                                        var html = '';
+                                                        for (var compositeKey in selections) {
+                                                            var info = selections[compositeKey];
+                                                            var parts = compositeKey.split(':');
+                                                            var partId = parts.length > 1 ? parts[1] : parts[0];
+                                                            var lbl = LABELS[partId] || partId;
+                                                            var viewLbl = info.view === 'front' ? 'av.' : 'arr.';
+                                                            html += '<span class="daily-sel-item">' +
+                                                                lbl + ' (' + viewLbl + ') ' +
+                                                                '<select onchange="window._dailyBPSetSev(\\''+compositeKey+'\\',this.value)">' +
+                                                                '<option value="1"'+(info.severity==1?' selected':'')+'>1-Legere</option>' +
+                                                                '<option value="2"'+(info.severity==2?' selected':'')+'>2-Moderee</option>' +
+                                                                '<option value="3"'+(info.severity==3?' selected':'')+'>3-Severe</option>' +
+                                                                '</select>' +
+                                                                '<span class="remove-btn" onclick="window._dailyBPRemove(\\''+compositeKey+'\\')">x</span>' +
+                                                                '</span>';
+                                                        }
+                                                        listEl.innerHTML = html;
+                                                    }
+                                                    if (window.Shiny) {
+                                                        Shiny.setInputValue('daily_pain_selections', JSON.stringify(selections));
+                                                    }
+                                                }
+
+                                                window._dailyBPSetSev = function(key, sev) {
+                                                    if (selections[key]) { selections[key].severity = parseInt(sev); render(); }
+                                                };
+                                                window._dailyBPRemove = function(key) {
+                                                    delete selections[key]; render();
+                                                };
+
+                                                document.addEventListener('click', function(e) {
+                                                    var el = e.target.closest('.daily-bp');
+                                                    if (!el) return;
+                                                    var partId = el.dataset.part;
+                                                    var viewEl = el.closest('[data-view]');
+                                                    if (!viewEl) return;
+                                                    var view = viewEl.dataset.view;
+                                                    var key = view + ':' + partId;
+                                                    if (selections[key]) {
+                                                        delete selections[key];
+                                                    } else {
+                                                        selections[key] = {view: view, severity: 1};
+                                                    }
+                                                    render();
+                                                });
+                                                render();
+                                            })();
+                                        """),
+
+
+                                        # Capacity to execute training (0-3 scale)
                                         ui.div(
-                                            ui.tags.label("Type d'inconfort/douleur et zone", style="font-weight: 600; margin-bottom: 0.5rem; display: block;"),
-                                            ui.input_text("daily_douleur_type_zone", "", placeholder="Ex: tendinopathie achille droite"),
+                                            ui.tags.label("Capacite d'execution de l'entrainement", style="font-weight: 600; margin-bottom: 0.5rem; display: block;"),
+                                            ui.input_radio_buttons(
+                                                "daily_capacite_execution",
+                                                "",
+                                                choices={
+                                                    "0": "0 - Non complete",
+                                                    "1": "1 - Fortement limite",
+                                                    "2": "2 - Partiellement limite",
+                                                    "3": "3 - Pleine capacite"
+                                                },
+                                                selected="3",
+                                                inline=True
+                                            ),
                                             style="margin-bottom: 1rem;"
                                         ),
 
                                         ui.div(
-                                            ui.tags.label("La douleur a-t-elle réduit votre participation ou performance ?", style="font-weight: 600; margin-bottom: 0.5rem; display: block;"),
+                                            ui.tags.label("La douleur a-t-elle reduit votre participation ou performance ?", style="font-weight: 600; margin-bottom: 0.5rem; display: block;"),
                                             ui.input_radio_buttons("daily_douleur_impact", "", choices=["Non", "Oui"], selected="Non", inline=True),
                                             style="margin-bottom: 1rem;"
                                         ),
@@ -2917,7 +3293,11 @@ def server(input, output, session):
     user_role = reactive.Value(None)  # 'athlete' or 'coach'
     user_athlete_id = reactive.Value(None)  # athlete_id for athletes, None for coach
     user_name = reactive.Value(None)
-    
+
+    # ========== DATA REFRESH ==========
+    refresh_status = reactive.Value("")  # "", "loading", "success", "error"
+    refresh_message = reactive.Value("")
+
     # Show login modal on startup
     ui.modal_show(login_modal)
     
@@ -2934,15 +3314,26 @@ def server(input, output, session):
             )
             return
 
-        # Fetch all users from database
         try:
-            users_response = supa_select("users", select="*")
+            # Generate password prefix for fast lookup (O(1) instead of O(n))
+            prefix = generate_password_prefix(password)
 
-            # Check password against all users
+            # Query users by prefix - instant indexed lookup
+            response = requests.get(
+                f"{SUPABASE_URL}/rest/v1/users?password_prefix=eq.{prefix}&select=*",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json"
+                }
+            )
+            matching_users = response.json()
+
+            # Verify bcrypt for matching users (usually just 1)
             authenticated_user = None
-            for _, user_row in users_response.iterrows():
-                if verify_password(password, user_row['password_hash']):
-                    authenticated_user = user_row
+            for user in matching_users:
+                if verify_password(password, user['password_hash']):
+                    authenticated_user = user
                     break
 
             if authenticated_user is not None:
@@ -2982,13 +3373,137 @@ def server(input, output, session):
         user_athlete_id.set(None)
         user_name.set(None)
         ui.modal_show(login_modal)
-    
+
+    # Data refresh handler (triggers Lambda)
+    @reactive.Effect
+    @reactive.event(input.refresh_data_btn)
+    async def handle_refresh_data():
+        if not LAMBDA_FUNCTION_URL or not LAMBDA_REFRESH_TOKEN:
+            refresh_status.set("error")
+            refresh_message.set("Refresh non configure")
+            return
+
+        # Check rate limit (3 per day)
+        try:
+            check_resp = _sess.get(
+                f"{SUPABASE_URL}/rest/v1/rpc/check_sync_allowed",
+                timeout=10
+            )
+            if check_resp.status_code == 200:
+                result = check_resp.json()
+                if result and len(result) > 0:
+                    if not result[0].get("allowed", True):
+                        refresh_status.set("error")
+                        refresh_message.set(f"Limite atteinte ({result[0].get('count_today', 3)}/3 aujourd'hui)")
+                        return
+        except Exception as e:
+            print(f"[WARN] Could not check sync limit: {e}")
+            # Continue anyway if check fails
+
+        refresh_status.set("loading")
+        role = user_role.get()
+        if role == "coach":
+            refresh_message.set("Synchronisation de tous les athletes en cours...")
+        else:
+            refresh_message.set("Synchronisation de vos donnees en cours...")
+
+        # Log sync start
+        current_user = user_name.get() or "unknown"
+        try:
+            _sess.post(
+                f"{SUPABASE_URL}/rest/v1/sync_log",
+                json={"triggered_by": current_user, "status": "started"},
+                timeout=10
+            )
+        except Exception as e:
+            print(f"[WARN] Could not log sync start: {e}")
+
+        try:
+            import asyncio
+            # Run HTTP request in background to not block UI
+            # Athletes sync only their own data; coaches sync everyone
+            sync_body = {}
+            if role != "coach":
+                sync_athlete_name = user_name.get()
+                if sync_athlete_name:
+                    sync_body = {"athlete_name": sync_athlete_name}
+
+            def do_request():
+                return requests.post(
+                    LAMBDA_FUNCTION_URL,
+                    headers={
+                        "Authorization": f"Bearer {LAMBDA_REFRESH_TOKEN}",
+                        "Content-Type": "application/json"
+                    },
+                    json=sync_body,
+                    timeout=900  # 15 minutes max
+                )
+
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, do_request)
+
+            if response.status_code == 200 or response.status_code == 207:
+                data = response.json()
+                msg = data.get("message", "Synchronisation terminee")
+                refresh_status.set("success")
+                refresh_message.set(msg)
+            elif response.status_code == 401:
+                refresh_status.set("error")
+                refresh_message.set("Erreur d'authentification")
+            else:
+                refresh_status.set("error")
+                refresh_message.set(f"Erreur: {response.status_code}")
+
+        except requests.exceptions.Timeout:
+            refresh_status.set("warning")
+            refresh_message.set("Synchronisation peut encore etre en cours...")
+        except Exception as e:
+            refresh_status.set("error")
+            refresh_message.set(f"Erreur: {str(e)[:50]}")
+
+    # Refresh status display
+    @output
+    @render.ui
+    def refresh_status_display():
+        status = refresh_status.get()
+        message = refresh_message.get()
+
+        if not status:
+            return ui.div()
+
+        if status == "loading":
+            return ui.span(
+                ui.tags.i(class_="fa fa-spinner fa-spin", style="margin-right: 0.5rem;"),
+                message,
+                style="color: #3b82f6; font-size: 0.9rem; margin-right: 0.75rem;"
+            )
+        elif status == "success":
+            return ui.span(
+                ui.tags.i(class_="fa fa-check", style="margin-right: 0.5rem;"),
+                message,
+                style="color: #22c55e; font-size: 0.9rem; margin-right: 0.75rem;"
+            )
+        elif status == "warning":
+            return ui.span(
+                ui.tags.i(class_="fa fa-clock", style="margin-right: 0.5rem;"),
+                message,
+                style="color: #f59e0b; font-size: 0.9rem; margin-right: 0.75rem;"
+            )
+        else:  # error
+            return ui.span(
+                ui.tags.i(class_="fa fa-times", style="margin-right: 0.5rem;"),
+                message,
+                style="color: #ef4444; font-size: 0.9rem; margin-right: 0.75rem;"
+            )
+
     # Render dashboard content conditionally
     @output
     @render.ui
     def dashboard_content():
         if not is_authenticated.get():
             return ui.div()  # Empty div when not authenticated
+        # Return the full dashboard UI
+        print("[DEBUG] dashboard_content returning FULL UI", flush=True)
         return dashboard_content_ui()
     
     # Render user info
@@ -3002,6 +3517,38 @@ def server(input, output, session):
         # For coach, just show "Coach", for athletes show their name
         display_text = "Coach" if role == "coach" else name
         return ui.tags.button(display_text, class_="btn btn-light", style="font-weight: 600; font-size: 1.1rem; cursor: default;", disabled=True)
+
+    # TEST: Simple matplotlib plot to see if non-Plotly graphs work
+    @output
+    @render.plot
+    def test_matplotlib_plot():
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot([1, 2, 3, 4], [1, 4, 2, 3], 'b-o')
+        ax.set_title("Test Matplotlib Plot")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        return fig
+
+    # Helper function to render Plotly as HTML (workaround for shinywidgets crash on ShinyApps.io)
+    # Track if plotly.js has been included already to avoid duplicates
+    _plotly_js_included = {"value": False}
+
+    def plotly_to_html(fig):
+        """Convert a Plotly figure to HTML for rendering without shinywidgets."""
+        # Only include plotly.js on first graph, then use 'cdn' for rest
+        if not _plotly_js_included["value"]:
+            _plotly_js_included["value"] = True
+            include_js = True  # First graph: embed full JS
+        else:
+            include_js = 'cdn'  # Subsequent: use CDN (JS already loaded)
+
+        html_str = fig.to_html(
+            full_html=False,
+            include_plotlyjs=include_js,
+            config={'responsive': True, 'displayModeBar': True}
+        )
+        return ui.HTML(html_str)
 
     # Helper function to get effective athlete_id for filtering
     def get_effective_athlete_id():
@@ -3195,6 +3742,7 @@ def server(input, output, session):
     @reactive.Effect
     @reactive.event(input.athlete, input.date_start, input.date_end, input.incl_vrun)
     def _reload_meta():
+        print("[DEBUG] _reload_meta called", flush=True)
         try:
             # Get the effective athlete_id based on role and selection
             athlete_id = get_effective_athlete_id()
@@ -3248,7 +3796,8 @@ def server(input, output, session):
             _update_activity_choices(pd.DataFrame())
 
     # ----------------- Résumé de période -----------------
-    @render_plotly
+    @output
+    @render.ui
     def run_duration_trend():
         """
         Temps de course moyen avec CTL/ATL configurables pour Run/Trail/Tapis.
@@ -3256,16 +3805,19 @@ def server(input, output, session):
         ATL = Acute Training Load (microcycle, défaut 7j)
         TSB = Training Stress Balance (CTL - ATL)
         """
+        print("[RUN_TREND] Starting run_duration_trend render...", flush=True)
         df_all = meta_df_all.get().copy()
+        print(f"[RUN_TREND] meta_df_all has {len(df_all)} rows", flush=True)
 
         if df_all.empty:
-            return _create_empty_plotly_fig("Aucune activité", height=360)
+            print("[RUN_TREND] No data, returning empty fig", flush=True)
+            return plotly_to_html(_create_empty_plotly_fig("Aucune activité", height=360))
 
         try:
             start_date = pd.to_datetime(input.date_start()).date()
             end_date = pd.to_datetime(input.date_end()).date()
         except Exception:
-            return _create_empty_plotly_fig("Sélectionnez une période valide", height=360)
+            return plotly_to_html(_create_empty_plotly_fig("Sélectionnez une période valide", height=360))
 
         if start_date > end_date:
             start_date, end_date = end_date, start_date
@@ -3276,15 +3828,15 @@ def server(input, output, session):
             type_series = df_all.get("type", pd.Series(dtype=str)).astype(str).str.lower()
         m_run = type_series.isin(RUN_TYPES)
         if not m_run.any():
-            return _create_empty_plotly_fig("Aucune sortie de course sur cette période", height=360)
+            return plotly_to_html(_create_empty_plotly_fig("Aucune sortie de course sur cette période", height=360))
 
         metric_col = "duration_min" if metric_mode == "time" else "distance_km"
         if metric_col not in df_all.columns:
-            return _create_empty_plotly_fig("Mesure indisponible pour ces activités", height=360)
+            return plotly_to_html(_create_empty_plotly_fig("Mesure indisponible pour ces activités", height=360))
 
         d_all = df_all.loc[m_run].dropna(subset=["date_local"])
         if d_all.empty:
-            return _create_empty_plotly_fig("Aucune donnée exploitable", height=360)
+            return plotly_to_html(_create_empty_plotly_fig("Aucune donnée exploitable", height=360))
 
         daily = d_all.groupby("date_local", as_index=True)[metric_col].sum().astype(float)
         daily = daily.sort_index()
@@ -3309,7 +3861,7 @@ def server(input, output, session):
             legend_tsb = "TSB (min)"
 
         if not np.isfinite(daily_values).any() or np.isclose(daily_values.sum(), 0.0):
-            return _create_empty_plotly_fig("Valeurs nulles sur cette période", height=360)
+            return plotly_to_html(_create_empty_plotly_fig("Valeurs nulles sur cette période", height=360))
 
         # Dynamic min_periods: start calculating as soon as we have data
         # Use minimum of 1 day to allow immediate calculation with available data
@@ -3323,16 +3875,16 @@ def server(input, output, session):
 
         mask = ctl.notna()
         if not mask.any():
-            return _create_empty_plotly_fig(f"Aucune donnée disponible pour le calcul.", height=360)
+            return plotly_to_html(_create_empty_plotly_fig(f"Aucune donnée disponible pour le calcul.", height=360))
 
         available_idx = ctl.index[mask]
         disp_start = max(start_date, available_idx.min().date())
         disp_end = min(end_date, available_idx.max().date())
         if disp_start > disp_end:
-            return _create_empty_plotly_fig("Aucune donnée dans la plage sélectionnée", height=360)
+            return plotly_to_html(_create_empty_plotly_fig("Aucune donnée dans la plage sélectionnée", height=360))
         display_mask = mask & (ctl.index.date >= disp_start) & (ctl.index.date <= disp_end)
         if not display_mask.any():
-            return _create_empty_plotly_fig("Aucune donnée dans la plage sélectionnée", height=360)
+            return plotly_to_html(_create_empty_plotly_fig("Aucune donnée dans la plage sélectionnée", height=360))
 
         idx = ctl.index[display_mask].to_pydatetime()  # Convert to Python datetime for Plotly
         ctl_vals = ctl.loc[display_mask]
@@ -3361,7 +3913,8 @@ def server(input, output, session):
             fillcolor=f'rgba(217, 35, 35, 0.15)',
             line=dict(color=color28, width=3),
             name=legend_ctl,
-            mode='lines'
+            mode='lines',
+            hovertemplate=legend_ctl + "<br>%{x|%d %b %Y}<br>%{y:.1f}<extra></extra>"
         ))
         
         # ATL line
@@ -3369,7 +3922,8 @@ def server(input, output, session):
             x=idx, y=atl_vals.values,
             line=dict(color=color7, width=2.5),
             name=legend_atl,
-            mode='lines'
+            mode='lines',
+            hovertemplate=legend_atl + "<br>%{x|%d %b %Y}<br>%{y:.1f}<extra></extra>"
         ))
         
         # TSB line (dotted)
@@ -3377,7 +3931,8 @@ def server(input, output, session):
             x=idx, y=tsb_vals.values,
             line=dict(color=color_tsb, width=2, dash='dot'),
             name=legend_tsb,
-            mode='lines'
+            mode='lines',
+            hovertemplate=legend_tsb + "<br>%{x|%d %b %Y}<br>%{y:.1f}<extra></extra>"
         ))
         
         fig.update_layout(
@@ -3405,15 +3960,71 @@ def server(input, output, session):
             legend=dict(x=0, y=1, bgcolor='rgba(255,255,255,0.9)', font=dict(size=13)),
             margin=dict(l=70, r=30, t=70, b=70)
         )
-        
-        return fig
 
-    @render_plotly
+        # Add race markers (vertical lines) - same as zone_time_longitudinal
+        try:
+            # Safely get selected_race - might not exist if dropdown wasn't rendered
+            try:
+                selected_race_id = input.selected_race()
+            except Exception:
+                selected_race_id = None
+            if selected_race_id and selected_race_id != "":
+                race = get_race_by_id(int(selected_race_id))
+                if race:
+                    race_date = race.get('test_date')
+                    race_date_str = str(race_date) if race_date else None
+                    distance_m = race.get('distance_m', 0)
+
+                    if race_date_str:
+                        if distance_m >= 1000:
+                            dist_display = f"{distance_m / 1000:.1f}km"
+                        else:
+                            dist_display = f"{distance_m}m"
+
+                        fig.add_vline(
+                            x=race_date_str,
+                            line_dash="solid",
+                            line_color="#F59E0B",
+                            line_width=2.5,
+                            annotation_text=f"Course: {dist_display}",
+                            annotation_position="top right",
+                            annotation_font_size=10,
+                            annotation_font_color="#F59E0B"
+                        )
+
+                        try:
+                            show_sim = input.show_simulated_race()
+                        except Exception:
+                            show_sim = False
+                        if show_sim:
+                            try:
+                                sim_date = input.simulated_race_date()
+                            except Exception:
+                                sim_date = None
+                            if sim_date:
+                                sim_date_str = sim_date.strftime('%Y-%m-%d') if hasattr(sim_date, 'strftime') else str(sim_date)
+                                fig.add_vline(
+                                    x=sim_date_str,
+                                    line_dash="dash",
+                                    line_color="#8B5CF6",
+                                    line_width=2,
+                                    annotation_text=f"Simulation: {dist_display}",
+                                    annotation_position="top left",
+                                    annotation_font_size=10,
+                                    annotation_font_color="#8B5CF6"
+                                )
+        except Exception as e:
+            print(f"Error adding race markers to trend graph: {e}")
+
+        return plotly_to_html(fig)
+
+    @output
+    @render.ui
     def pie_types():
         df = meta_df.get()
 
         if df.empty:
-            return _create_empty_plotly_fig("Aucune activité", height=500)
+            return plotly_to_html(_create_empty_plotly_fig("Aucune activité", height=500))
 
         # Grouper types → "Course" (Run+TrailRun combined), "Tapis" (VirtualRun), "Autre" (cross-training)
         type_map = {"run": "Course", "trailrun": "Course", "virtualrun": "Tapis"}
@@ -3424,10 +4035,10 @@ def server(input, output, session):
         df_lower.loc[df_lower["_grp"].isna(), "_grp"] = "Autre"
         g = df_lower.copy()
         if g.empty:
-            return _create_empty_plotly_fig("Aucune activité", height=500)
+            return plotly_to_html(_create_empty_plotly_fig("Aucune activité", height=500))
         s = pd.to_numeric(g["duration_sec"], errors="coerce").fillna(0).groupby(g["_grp"]).sum().sort_values(ascending=False)
         if s.sum() <= 0:
-            return _create_empty_plotly_fig("Aucune durée disponible", height=500)
+            return plotly_to_html(_create_empty_plotly_fig("Aucune durée disponible", height=500))
 
         labels = s.index.tolist()
         sizes = s.values
@@ -3461,10 +4072,11 @@ def server(input, output, session):
             margin=dict(l=20, r=20, t=70, b=20),
             font=dict(size=14)
         )
-        return fig
+        return plotly_to_html(fig)
 
 
-    @render_plotly
+    @output
+    @render.ui
     def pace_hr_scatter():
         """
         Nuage de points : 1 point par activité (pas d'agrégation par bins)
@@ -3478,7 +4090,7 @@ def server(input, output, session):
         df = meta_df.get().copy()
 
         if df.empty:
-            return _create_empty_plotly_fig("Aucune activité", height=480)
+            return plotly_to_html(_create_empty_plotly_fig("Aucune activité", height=480))
 
         # Prépare les colonnes nécessaires
         df["dist_km"] = pd.to_numeric(df.get("distance_m"), errors="coerce") / 1000.0
@@ -3492,7 +4104,7 @@ def server(input, output, session):
         m_valid = (df["dist_km"] > 0) & (df["dur_s"] > 0) & df["avg_hr"].notna() & df["start_time_naive"].notna()
         d = df.loc[m_valid].copy()
         if d.empty:
-            return _create_empty_plotly_fig("Aucune donnée exploitable (pace/FC)", height=480)
+            return plotly_to_html(_create_empty_plotly_fig("Aucune donnée exploitable (pace/FC)", height=480))
 
         # Allure moyenne par activité (sec/km)
         d["pace_skm"] = d["dur_s"] / d["dist_km"]
@@ -3504,7 +4116,7 @@ def server(input, output, session):
         d = d[(d["pace_skm"] >= 210) & (d["pace_skm"] <= 300)].copy()
 
         if d.empty:
-            return _create_empty_plotly_fig("Aucun point dans la plage d'allure 3:30–5:00", height=480)
+            return plotly_to_html(_create_empty_plotly_fig("Aucun point dans la plage d'allure 3:30–5:00", height=480))
 
         # Helper for formatting pace
         def format_pace(sec_per_km):
@@ -3521,22 +4133,24 @@ def server(input, output, session):
                        '#C2410C', '#FDBA74']
         
         fig = go.Figure()
-        
+        show_dots = input.show_pace_hr_dots()
+
         for i, m in enumerate(months):
             gd = d[d["month"] == m]
             color = colors_club[i % len(colors_club)]
-            
-            # Scatter points
-            fig.add_trace(go.Scatter(
-                x=gd["pace_skm"].values,
-                y=gd["avg_hr"].values,
-                mode='markers',
-                marker=dict(size=8, color=color, opacity=0.85),
-                name=m,
-                customdata=[[format_pace(p)] for p in gd["pace_skm"].values],
-                hovertemplate='<b>%{fullData.name}</b><br>Allure: %{customdata[0]}<br>FC: %{y:.0f} bpm<extra></extra>'
-            ))
-            
+
+            # Scatter points (toggled by checkbox)
+            if show_dots:
+                fig.add_trace(go.Scatter(
+                    x=gd["pace_skm"].values,
+                    y=gd["avg_hr"].values,
+                    mode='markers',
+                    marker=dict(size=8, color=color, opacity=0.85),
+                    name=m,
+                    customdata=[[format_pace(p)] for p in gd["pace_skm"].values],
+                    hovertemplate='<b>%{fullData.name}</b><br>Allure: %{customdata[0]}<br>FC: %{y:.0f} bpm<extra></extra>'
+                ))
+
             # Ligne de tendance par mois
             gdl = gd.dropna(subset=["pace_skm", "avg_hr"]).copy()
             if not gdl.empty:
@@ -3550,7 +4164,8 @@ def server(input, output, session):
                         y=b["avg_hr"].values,
                         mode='lines',
                         line=dict(color=color, width=2),
-                        showlegend=False,
+                        showlegend=not show_dots,
+                        name=m if not show_dots else None,
                         hoverinfo='skip'
                     ))
 
@@ -3583,9 +4198,10 @@ def server(input, output, session):
             legend=dict(title=dict(text="Mois", font=dict(size=13)), orientation="v", x=1.0, y=0.5, font=dict(size=12)),
             margin=dict(l=70, r=120, t=50, b=70)
         )
-        return fig
+        return plotly_to_html(fig)
 
-    @render_plotly
+    @output
+    @render.ui
     def weekly_volume():
         """Aires empilées hebdomadaires en kilomètres, séparées par type (Run, TrailRun, VirtualRun).
         Semaine calée sur LUNDI dans le fuseau LOCAL_TZ et index complet basé sur un calendrier (sans trous).
@@ -3593,7 +4209,7 @@ def server(input, output, session):
         df = meta_df.get()
 
         if df.empty:
-            return _create_empty_plotly_fig("Aucune activité", height=480)
+            return plotly_to_html(_create_empty_plotly_fig("Aucune activité", height=480))
 
         d = df.copy()
 
@@ -3608,7 +4224,7 @@ def server(input, output, session):
             ))
         ).dropna(subset=["start_time_local", "_cat"])  # uniquement les 3 types de course
         if d.empty:
-            return _create_empty_plotly_fig("Aucune donnée de course", height=480)
+            return plotly_to_html(_create_empty_plotly_fig("Aucune donnée de course", height=480))
 
         # Lundi local = normaliser à minuit local puis soustraire le weekday (0=lundi)
         wk_start = (d["start_time_local"].dt.floor("D") - pd.to_timedelta(d["start_time_local"].dt.weekday, unit="D"))
@@ -3694,8 +4310,8 @@ def server(input, output, session):
             legend=dict(x=0, y=1, bgcolor='rgba(255,255,255,0.9)', font=dict(size=13)),
             margin=dict(l=70, r=30, t=70, b=70)
         )
-        return fig
-    
+        return plotly_to_html(fig)
+
     # Pace zone analysis (uses shared date range from date_start/date_end)
     @output
     @render.ui
@@ -3839,6 +4455,7 @@ def server(input, output, session):
     @reactive.event(input.athlete, user_athlete_id)
     def _update_zone_time_zones():
         """Load available pace zones when athlete changes."""
+        print("[DEBUG] _update_zone_time_zones called", flush=True)
         role = user_role.get()
         if role == "coach":
             # input.athlete() returns athlete NAME, convert to athlete_id
@@ -3895,34 +4512,78 @@ def server(input, output, session):
             inline=True
         )
 
-    @output
+    # Race selector dropdown for "Résumé de période"
     @render.ui
-    def monotony_zone_checkboxes():
-        """Dynamically render zone checkboxes for monotony/strain calculation."""
-        zones = zone_time_available_zones.get()
-        if not zones:
-            return ui.div(
-                ui.tags.p("Aucune zone d'allure configuree pour cet athlete.",
-                         style="color: #666; font-style: italic; padding: 0.5rem;")
-            )
+    def race_selector_dropdown():
+        """Render race selector dropdown based on current athlete."""
+        print("[DEBUG] race_selector_dropdown called", flush=True)
+        try:
+            role = user_role.get()
+            if role == "coach":
+                try:
+                    athlete_name = input.athlete()
+                except Exception:
+                    athlete_name = None
+                athlete_id = name_to_id.get(athlete_name) if athlete_name else None
+            else:
+                athlete_id = user_athlete_id.get()
 
-        # Build checkbox choices - same as zone_time_checkboxes
-        choices = {str(z["zone_number"]): z["label"] for z in zones}
+            if not athlete_id:
+                return ui.p("Sélectionnez un athlète", style="color: #666; font-style: italic; margin: 0;")
 
-        # Default: select all zones
-        default_selected = [str(z["zone_number"]) for z in zones]
+            races = get_athlete_races(athlete_id)
 
-        return ui.input_checkbox_group(
-            "monotony_zones",
+            if not races:
+                return ui.p("Aucune course enregistrée", style="color: #666; font-style: italic; margin: 0;")
+        except Exception as e:
+            print(f"Error in race_selector_dropdown: {e}")
+            return ui.p("Erreur de chargement", style="color: #666; font-style: italic; margin: 0;")
+
+        # Build choices dict
+        choices = {"": "-- Sélectionner une course --"}
+        for race in races:
+            race_id = str(race.get("id", ""))
+            test_date = race.get("test_date", "")
+            distance_m = race.get("distance_m", 0)
+            race_time = race.get("race_time_seconds")
+
+            # Format label: "2025-03-15 - 10000m (42:30)"
+            label = f"{test_date} - {distance_m}m"
+            if race_time:
+                time_str = format_time_from_seconds(race_time)
+                label += f" ({time_str})"
+
+            choices[race_id] = label
+
+        return ui.input_select(
+            "selected_race",
             "",
             choices=choices,
-            selected=default_selected,
-            inline=True
+            width="250px"
+        )
+
+    # Simulated race date input (shown only when checkbox is checked)
+    @render.ui
+    def simulated_race_date_input():
+        """Render date input for race simulation."""
+        try:
+            show_sim = input.show_simulated_race()
+        except Exception:
+            show_sim = False
+        if not show_sim:
+            return ui.div()  # Hidden when checkbox unchecked
+
+        return ui.input_date(
+            "simulated_race_date",
+            "Date simulée:",
+            value=str(datetime.now().date()),
+            width="150px"
         )
 
     @render.ui
     def zone_change_banner():
         """Show info banner when zone configuration changed within selected date range."""
+        print("[DEBUG] zone_change_banner called", flush=True)
         try:
             start_date = pd.to_datetime(input.date_start()).date()
             end_date = pd.to_datetime(input.date_end()).date()
@@ -3965,17 +4626,21 @@ def server(input, output, session):
             style="background-color: #e0f2fe; border: 1px solid #7dd3fc; border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 0.5rem; color: #0369a1; font-size: 0.9rem;"
         )
 
-    @render_plotly
+    @output
+    @render.ui
     def zone_time_longitudinal():
         """Render longitudinal zone time chart with multi-zone support and merge/distinct modes."""
+        print("[ZONE_LONG] Starting zone_time_longitudinal render...", flush=True)
         zones = zone_time_available_zones.get()
+        print(f"[ZONE_LONG] Got zones: {len(zones) if zones else 0}", flush=True)
         if not zones:
-            return _create_empty_plotly_fig("Configurez les zones d'allure pour cet athlete", height=360)
+            return plotly_to_html(_create_empty_plotly_fig("Configurez les zones d'allure pour cet athlete", height=360))
 
         # Get selected zones (now multiple from checkbox group)
         selected = input.zone_time_zones()
+        print(f"[ZONE_LONG] Selected zones: {selected}", flush=True)
         if not selected or len(selected) == 0:
-            return _create_empty_plotly_fig("Selectionnez au moins une zone", height=360)
+            return plotly_to_html(_create_empty_plotly_fig("Selectionnez au moins une zone", height=360))
 
         # Convert to list of integers
         selected_zones = sorted([int(z) for z in selected])
@@ -3988,7 +4653,7 @@ def server(input, output, session):
             start_date = pd.to_datetime(input.date_start()).date()
             end_date = pd.to_datetime(input.date_end()).date()
         except Exception:
-            return _create_empty_plotly_fig("Selectionnez une periode valide", height=360)
+            return plotly_to_html(_create_empty_plotly_fig("Selectionnez une periode valide", height=360))
 
         if start_date > end_date:
             start_date, end_date = end_date, start_date
@@ -4002,13 +4667,13 @@ def server(input, output, session):
             athlete_id = user_athlete_id.get()
 
         if not athlete_id:
-            return _create_empty_plotly_fig("Aucun athlete selectionne", height=360)
+            return plotly_to_html(_create_empty_plotly_fig("Aucun athlete selectionne", height=360))
 
         # Fetch pre-calculated zone times from materialized view
         weekly_df = fetch_weekly_zone_time_from_view(athlete_id, start_date, end_date)
 
         if weekly_df.empty:
-            return _create_empty_plotly_fig("Aucune donnee pour cette periode", height=360)
+            return plotly_to_html(_create_empty_plotly_fig("Aucune donnee pour cette periode", height=360))
 
         # Fill missing weeks with 0
         weekly_df["week_start"] = pd.to_datetime(weekly_df["week_start"])
@@ -4018,6 +4683,9 @@ def server(input, output, session):
         last_week = end_date - timedelta(days=end_date.weekday())
         full_weeks = pd.date_range(first_week, last_week, freq="W-MON")
 
+        # Drop non-numeric columns before reindex (fill_value=0 fails on string cols like athlete_id)
+        non_numeric_cols = weekly_df.select_dtypes(exclude='number').columns.difference(["week_start"])
+        weekly_df = weekly_df.drop(columns=non_numeric_cols, errors="ignore")
         weekly_df = weekly_df.set_index("week_start").reindex(full_weeks, fill_value=0).reset_index()
         weekly_df = weekly_df.rename(columns={"index": "week_start"})
 
@@ -4031,7 +4699,7 @@ def server(input, output, session):
             # MERGE MODE: Stacked bar chart showing each zone as a segment
             zone_cols = [f"zone_{z}_minutes" for z in selected_zones if f"zone_{z}_minutes" in weekly_df.columns]
             if not zone_cols:
-                return _create_empty_plotly_fig("Aucune donnee pour les zones selectionnees", height=360)
+                return plotly_to_html(_create_empty_plotly_fig("Aucune donnee pour les zones selectionnees", height=360))
 
             # Apply EWM smoothing to each zone individually
             smoothed_data = {}
@@ -4050,12 +4718,12 @@ def server(input, output, session):
             display_df = weekly_df[valid_mask].copy()
 
             if display_df.empty:
-                return _create_empty_plotly_fig("Pas assez d'historique pour la moyenne mobile", height=360)
+                return plotly_to_html(_create_empty_plotly_fig("Pas assez d'historique pour la moyenne mobile", height=360))
 
             # Check if all values are zero
             total_sum = sum(smoothed_data[zn][valid_mask].sum() for zn in smoothed_data)
             if total_sum < 0.1:
-                return _create_empty_plotly_fig("Aucune donnee GPS/allure pour cet athlete", height=360)
+                return plotly_to_html(_create_empty_plotly_fig("Aucune donnee GPS/allure pour cet athlete", height=360))
 
             # Convert x-axis dates to strings for Plotly
             x_dates = [d.strftime('%Y-%m-%d') for d in display_df["week_start"]]
@@ -4135,7 +4803,7 @@ def server(input, output, session):
                 ))
 
             if not has_data:
-                return _create_empty_plotly_fig("Aucune donnee GPS/allure pour les zones selectionnees", height=360)
+                return plotly_to_html(_create_empty_plotly_fig("Aucune donnee GPS/allure pour les zones selectionnees", height=360))
 
             # Title for distinct mode
             if len(selected_zones) == 1:
@@ -4191,6 +4859,49 @@ def server(input, output, session):
                         hovertemplate="ATL<br>Sem. %{x|%d %b}<br>%{y:.1f} min<extra></extra>"
                     ))
 
+        # Monotony and Strain overlay lines (Phase 2Y)
+        if input.show_monotony() or input.show_strain():
+            # Fetch pre-calculated data
+            ms_result_df = fetch_weekly_monotony_strain_from_db(
+                athlete_id, start_date, end_date, selected_zones
+            )
+            # Fallback to on-the-fly calculation if no pre-calculated data
+            if ms_result_df.empty:
+                daily_df = fetch_daily_zone_time(athlete_id, start_date, end_date)
+                if not daily_df.empty:
+                    ms_result_df = calculate_weekly_monotony_strain(
+                        daily_df, selected_zones, start_date, end_date
+                    )
+
+            if not ms_result_df.empty:
+                x_ms_dates = [d.strftime('%Y-%m-%d') for d in ms_result_df["week_start"]]
+
+                # Monotony overlay (purple dotted, yaxis2)
+                if input.show_monotony():
+                    y_monotony = ms_result_df["monotony"].tolist()
+                    fig.add_trace(go.Scatter(
+                        x=x_ms_dates,
+                        y=y_monotony,
+                        name="Monotonie",
+                        line=dict(color="#8B5CF6", width=2, dash="dot"),
+                        mode='lines',
+                        yaxis='y2',
+                        hovertemplate="Monotonie<br>Sem. %{x|%d %b}<br>%{y:.2f}<extra></extra>"
+                    ))
+
+                # Strain overlay (red dash-dot, yaxis3)
+                if input.show_strain():
+                    y_strain = ms_result_df["strain"].tolist()
+                    fig.add_trace(go.Scatter(
+                        x=x_ms_dates,
+                        y=y_strain,
+                        name="Strain",
+                        line=dict(color="#EF4444", width=2, dash="dashdot"),
+                        mode='lines',
+                        yaxis='y3',
+                        hovertemplate="Strain<br>Sem. %{x|%d %b}<br>%{y:.0f}<extra></extra>"
+                    ))
+
         # Set X-axis range
         if 'x_dates' in locals() and x_dates:
             x_range = [x_dates[0], x_dates[-1]]
@@ -4213,7 +4924,66 @@ def server(input, output, session):
                 annotation_font_color="#6b7280"
             )
 
-        fig.update_layout(
+        # Add race markers (vertical lines)
+        try:
+            # Safely get selected_race - might not exist if dropdown wasn't rendered
+            try:
+                selected_race_id = input.selected_race()
+            except Exception:
+                selected_race_id = None
+            if selected_race_id and selected_race_id != "":
+                race = get_race_by_id(int(selected_race_id))
+                if race:
+                    # Real race marker (gold/amber color)
+                    race_date = race.get('test_date')
+                    race_date_str = str(race_date) if race_date else None
+                    distance_m = race.get('distance_m', 0)
+
+                    if race_date_str:
+                        # Format distance for display
+                        if distance_m >= 1000:
+                            dist_display = f"{distance_m / 1000:.1f}km"
+                        else:
+                            dist_display = f"{distance_m}m"
+
+                        fig.add_vline(
+                            x=race_date_str,
+                            line_dash="solid",
+                            line_color="#F59E0B",
+                            line_width=2.5,
+                            annotation_text=f"Course: {dist_display}",
+                            annotation_position="top right",
+                            annotation_font_size=10,
+                            annotation_font_color="#F59E0B"
+                        )
+
+                        # Simulated race marker (if enabled)
+                        try:
+                            show_sim = input.show_simulated_race()
+                        except Exception:
+                            show_sim = False
+                        if show_sim:
+                            try:
+                                sim_date = input.simulated_race_date()
+                            except Exception:
+                                sim_date = None
+                            if sim_date:
+                                sim_date_str = sim_date.strftime('%Y-%m-%d') if hasattr(sim_date, 'strftime') else str(sim_date)
+                                fig.add_vline(
+                                    x=sim_date_str,
+                                    line_dash="dash",
+                                    line_color="#8B5CF6",
+                                    line_width=2,
+                                    annotation_text=f"Simulation: {dist_display}",
+                                    annotation_position="top left",
+                                    annotation_font_size=10,
+                                    annotation_font_color="#8B5CF6"
+                                )
+        except Exception as e:
+            print(f"Error adding race markers: {e}")
+
+        # Build layout configuration
+        layout_config = dict(
             autosize=True,
             title=dict(
                 text=title_text,
@@ -4246,140 +5016,35 @@ def server(input, output, session):
             margin=dict(l=70, r=30, t=70, b=70)
         )
 
-        return fig
-
-    @render_plotly
-    def monotony_strain_graph():
-        """Render Training Monotony and Strain graph (Carl Foster model)."""
-        zones = zone_time_available_zones.get()
-        if not zones:
-            return _create_empty_plotly_fig("Configurez les zones d'allure pour cet athlete", height=350)
-
-        # Get selected zones from monotony checkboxes
-        selected = input.monotony_zones()
-        if not selected or len(selected) == 0:
-            return _create_empty_plotly_fig("Selectionnez au moins une zone", height=350)
-
-        # Convert to list of integers
-        selected_zones = sorted([int(z) for z in selected])
-
-        # Get metric to display
-        metric = input.monotony_metric() or "strain"
-
-        # Get date range
-        try:
-            start_date = pd.to_datetime(input.date_start()).date()
-            end_date = pd.to_datetime(input.date_end()).date()
-        except Exception:
-            return _create_empty_plotly_fig("Selectionnez une periode valide", height=350)
-
-        if start_date > end_date:
-            start_date, end_date = end_date, start_date
-
-        # Get athlete ID
-        role = user_role.get()
-        if role == "coach":
-            athlete_name = input.athlete()
-            athlete_id = name_to_id.get(athlete_name)
-        else:
-            athlete_id = user_athlete_id.get()
-
-        if not athlete_id:
-            return _create_empty_plotly_fig("Aucun athlete selectionne", height=350)
-
-        # Try pre-calculated data first (Phase 2V optimization)
-        result_df = fetch_weekly_monotony_strain_from_db(athlete_id, start_date, end_date, selected_zones)
-
-        # Fallback to on-the-fly calculation if no pre-calculated data
-        if result_df.empty:
-            daily_df = fetch_daily_zone_time(athlete_id, start_date, end_date)
-            if daily_df.empty:
-                return _create_empty_plotly_fig("Aucune donnee pour cette periode", height=350)
-            result_df = calculate_weekly_monotony_strain(daily_df, selected_zones, start_date, end_date)
-
-        if result_df.empty:
-            return _create_empty_plotly_fig("Pas assez de donnees pour le calcul", height=350)
-
-        # Prepare data for Plotly
-        x_dates = [d.strftime('%Y-%m-%d') if hasattr(d, 'strftime') else str(d) for d in result_df["week_start"]]
-
-        if metric == "monotony":
-            y_values = result_df["monotony"].tolist()
-            y_title = "Monotonie"
-            title_text = "Monotonie hebdomadaire (1/CV)"
-            line_color = "#8B5CF6"  # Purple
-            hover_template = "Sem. %{x|%d %b}<br>Monotonie: %{y:.2f}<extra></extra>"
-        else:
-            y_values = result_df["strain"].tolist()
-            y_title = "Strain (charge × monotonie)"
-            title_text = "Strain hebdomadaire (Charge × Monotonie)"
-            line_color = "#EF4444"  # Red
-            hover_template = "Sem. %{x|%d %b}<br>Strain: %{y:.0f}<extra></extra>"
-
-        fig = go.Figure()
-
-        fig.add_trace(go.Scatter(
-            x=x_dates,
-            y=y_values,
-            mode='lines+markers',
-            line=dict(color=line_color, width=2.5),
-            marker=dict(size=6, color=line_color),
-            name=y_title,
-            hovertemplate=hover_template
-        ))
-
-        # Zone labels for title
-        zone_labels = ", ".join([f"Z{z}" for z in selected_zones])
-
-        # Add vertical lines for zone configuration changes
-        zone_changes = get_zone_changes_in_range(athlete_id, start_date, end_date)
-        for change in zone_changes:
-            change_date = change["effective_from_date"]
-            date_str = change_date.strftime('%Y-%m-%d') if hasattr(change_date, 'strftime') else str(change_date)
-            fig.add_vline(
-                x=date_str,
-                line_dash="dash",
-                line_color="#6b7280",
-                line_width=1.5,
-                annotation_text="Zones",
-                annotation_position="top",
-                annotation_font_size=9,
-                annotation_font_color="#6b7280"
+        # Add secondary Y-axis for Monotony (purple, right side)
+        if input.show_monotony():
+            layout_config['yaxis2'] = dict(
+                title=dict(text="Monotonie", font=dict(color="#8B5CF6")),
+                tickfont=dict(color="#8B5CF6"),
+                overlaying='y',
+                side='right',
+                showgrid=False,
+                rangemode='tozero'
             )
 
-        fig.update_layout(
-            autosize=True,
-            title=dict(
-                text=f"{title_text} ({zone_labels})",
-                font=dict(size=16, color='#262626')
-            ),
-            xaxis=dict(
-                title="Date",
-                type='date',
-                tickformat='%d %b',
-                showgrid=True,
-                gridcolor='rgba(128, 128, 128, 0.2)',
-                dtick="M1"
-            ),
-            yaxis=dict(
-                title=y_title,
-                showgrid=True,
-                gridcolor='rgba(128, 128, 128, 0.2)',
+        # Add third Y-axis for Strain (red, far right with offset)
+        if input.show_strain():
+            layout_config['yaxis3'] = dict(
+                title=dict(text="Strain", font=dict(color="#EF4444")),
+                tickfont=dict(color="#EF4444"),
+                overlaying='y',
+                side='right',
+                position=0.95,
+                showgrid=False,
                 rangemode='tozero'
-            ),
-            plot_bgcolor='white',
-            height=350,
-            hovermode='x unified',
-            legend=dict(
-                x=0, y=1,
-                bgcolor='rgba(255,255,255,0.9)',
-                font=dict(size=11),
-                orientation='h'
-            ),
-            margin=dict(l=70, r=30, t=70, b=70)
-        )
+            )
+            # Adjust right margin and x-axis domain to make room for third axis
+            layout_config['margin'] = dict(l=70, r=80, t=70, b=70)
+            layout_config['xaxis']['domain'] = [0, 0.9]
 
-        return fig
+        fig.update_layout(**layout_config)
+
+        return plotly_to_html(fig)
 
     # ----------------- Analyse de séance (X/Y dynamiques) -----------------
     @reactive.Calc
@@ -4501,7 +5166,8 @@ def server(input, output, session):
         xy_data._memo[key] = res
         return res
 
-    @render_plotly
+    @output
+    @render.ui
     def plot_xy():
         d = xy_data()
 
@@ -4520,7 +5186,7 @@ def server(input, output, session):
                 height=560,
                 plot_bgcolor="white"
             )
-            return fig
+            return plotly_to_html(fig)
 
         # Check if secondary Y-axis is requested
         try:
@@ -4604,12 +5270,21 @@ def server(input, output, session):
         else:
             x_hover = x_values
 
-        # Format y-axis values if needed (for pace)
+        # Format y-axis values if needed (for pace, or float metrics)
         # Note: y_values is already filtered above via range sliders
         y_is_time = d["y_fmt"] is not None
-        
+
+        # Rounding rules for float metrics in hover display
+        _hover_format = {
+            "vertical_oscillation": ".1f",
+            "leg_spring_stiffness": ".2f",
+        }
+
         if y_is_time:
             y_hover = [format_time(val) for val in y_values]
+        elif yvar1 in _hover_format:
+            fmt = _hover_format[yvar1]
+            y_hover = [f"{v:{fmt}}" if not np.isnan(v) else "N/A" for v in y_values]
         else:
             y_hover = y_values
         
@@ -4639,6 +5314,9 @@ def server(input, output, session):
                 y2_is_time = y2_fmt is not None
                 if y2_is_time:
                     y2_hover = [format_time(val) for val in y2]
+                elif yvar2 in _hover_format:
+                    fmt = _hover_format[yvar2]
+                    y2_hover = [f"{v:{fmt}}" if not np.isnan(v) else "N/A" for v in y2]
                 else:
                     y2_hover = y2
                 
@@ -4816,8 +5494,8 @@ def server(input, output, session):
                 margin=dict(l=70, r=70, t=50, b=70),
                 font=dict(size=13)
             )
-        
-        return fig
+
+        return plotly_to_html(fig)
 
     # ========== RANGE SELECTION & SUMMARY STATISTICS ==========
     
@@ -5841,20 +6519,21 @@ def server(input, output, session):
             pass
     
     # Main comparison plot
-    @render_plotly
+    @output
+    @render.ui
     def comparison_plot():
         if not input.comparison_enabled():
             fig = go.Figure()
             fig.add_annotation(text="Activez la comparaison", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=18, color="#666"))
             fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False), height=600, plot_bgcolor="white")
-            return fig
+            return plotly_to_html(fig)
 
         act_id_1 = comparison_activity_id_1.get()
         if not act_id_1:
             fig = go.Figure()
             fig.add_annotation(text="Sélectionnez l'Activité 1", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=18, color="#D92323"))
             fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False), height=600, plot_bgcolor="white")
-            return fig
+            return plotly_to_html(fig)
 
         try:
             df1 = fetch_timeseries_cached(act_id_1)
@@ -5862,14 +6541,14 @@ def server(input, output, session):
                 fig = go.Figure()
                 fig.add_annotation(text="Activité 1 sans données", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=18, color="#D92323"))
                 fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False), height=600, plot_bgcolor="white")
-                return fig
+                return plotly_to_html(fig)
 
             # Get crop range - don't modify reactive values here to avoid circular reactivity
             if 't_active_sec' not in df1.columns:
                 fig = go.Figure()
                 fig.add_annotation(text="Colonne t_active_sec manquante", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=18, color="#dc2626"))
                 fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False), height=600, plot_bgcolor="white")
-                return fig
+                return plotly_to_html(fig)
             
             crop1 = crop_range_1.get()
             max_time_1 = df1['t_active_sec'].max()
@@ -5885,7 +6564,7 @@ def server(input, output, session):
                 fig = go.Figure()
                 fig.add_annotation(text="Donnees de temps invalides pour l'Activite 1", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=18, color="#D92323"))
                 fig.update_layout(autosize=True, xaxis=dict(visible=False), yaxis=dict(visible=False), height=600, plot_bgcolor="white")
-                return fig
+                return plotly_to_html(fig)
 
             df1_cropped = crop_timeseries(df1, "time", crop1[0], crop1[1])
             print(f"[DEBUG comparison_plot] df1_cropped rows: {len(df1_cropped)}")
@@ -5895,7 +6574,7 @@ def server(input, output, session):
                 fig = go.Figure()
                 fig.add_annotation(text="Aucune donnee dans la plage selectionnee", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=18, color="#D92323"))
                 fig.update_layout(autosize=True, xaxis=dict(visible=False), yaxis=dict(visible=False), height=600, plot_bgcolor="white")
-                return fig
+                return plotly_to_html(fig)
 
             xvar = XVAR_ALIASES.get(input.comp_xvar() or "moving", "moving")
             yvar = YVAR_ALIASES.get(input.comp_yvar() or "Fréquence cardiaque", "heartrate")
@@ -5934,7 +6613,7 @@ def server(input, output, session):
                 fig = go.Figure()
                 fig.add_annotation(text="Aucune donnee valide pour l'Activite 1", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=18, color="#D92323"))
                 fig.update_layout(autosize=True, xaxis=dict(visible=False), yaxis=dict(visible=False), height=600, plot_bgcolor="white")
-                return fig
+                return plotly_to_html(fig)
 
             # Helper function to format seconds to mm:ss or hh:mm:ss
             def format_seconds_to_time(seconds):
@@ -5946,19 +6625,47 @@ def server(input, output, session):
                     return f"{h}:{m:02d}:{s:02d}"
                 else:
                     return f"{m}:{s:02d}"
-            
+
+            # Helper function to format pace (sec/km) to mm:ss
+            def format_pace(pace_sec):
+                """Convert pace in seconds/km to M:SS format"""
+                if pd.isna(pace_sec) or pace_sec <= 0:
+                    return "--:--"
+                m = int(pace_sec // 60)
+                s = int(pace_sec % 60)
+                return f"{m}:{s:02d}"
+
+            # Check if Y-axis is pace (needs MM:SS formatting)
+            is_pace_y1 = yvar == "pace" or "Allure" in y1_label
+
+            # Rounding rules for float metrics in hover display
+            _comp_hover_format = {
+                "vertical_oscillation": ".1f",
+                "leg_spring_stiffness": ".2f",
+            }
+
+            def _fmt_hover_vals(values, is_pace, var_name):
+                if is_pace:
+                    return [format_pace(p) for p in values]
+                fmt = _comp_hover_format.get(var_name, ".1f")
+                return [f"{v:{fmt}}" for v in values]
+
             # Create formatted time labels for hover
             x1_formatted = [format_seconds_to_time(t) for t in x1]
+            # Create formatted Y values for pace
+            y1_formatted = _fmt_hover_vals(y1, is_pace_y1, yvar)
 
             fig = go.Figure()
             # Primary Y-axis trace for Activity 1 (solid red)
+            # Use list of tuples for customdata: (time_formatted, y_formatted)
+            customdata_1 = list(zip(x1_formatted, y1_formatted))
             fig.add_trace(go.Scatter(
-                x=x1, y=y1, mode='lines', 
+                x=x1, y=y1, mode='lines',
                 line=dict(color='#D92323', width=2.5),
-                name=f"Activité 1 - {y1_label}", 
+                name=f"Activité 1 - {y1_label}",
                 yaxis='y',
-                customdata=x1_formatted,
-                hovertemplate='<b>Activité 1</b><br>Temps: %{customdata}<br>' + y1_label + ': %{y}<extra></extra>'
+                customdata=customdata_1,
+                hovertemplate='<b>Activité 1</b><br>Temps: %{customdata[0]}<br>' + y1_label + ': %{customdata[1]}<extra></extra>'
             ))
             
             # Secondary Y-axis trace for Activity 1 (dashed red) if selected
@@ -5973,14 +6680,18 @@ def server(input, output, session):
                 x1_y2 = [x for x, v in zip(x1_y2, valid_mask) if v]
                 y1_y2 = [y for y, v in zip(y1_y2, valid_mask) if v]
                 x1_y2_formatted = [format_seconds_to_time(t) for t in x1_y2]
+                # Check if secondary Y-axis is pace
+                is_pace_y2 = yvar2 == "pace" or "Allure" in y1_y2_label
+                y1_y2_formatted = _fmt_hover_vals(y1_y2, is_pace_y2, yvar2)
                 if len(x1_y2) > 0:  # Only add trace if there's data
+                    customdata_1_y2 = list(zip(x1_y2_formatted, y1_y2_formatted))
                     fig.add_trace(go.Scatter(
                         x=x1_y2, y=y1_y2, mode='lines',
                         line=dict(color='#D92323', width=2.5, dash='dash'),
                         name=f"Activité 1 - {y1_y2_label}",
                         yaxis='y2',
-                        customdata=x1_y2_formatted,
-                        hovertemplate='<b>Activité 1</b><br>Temps: %{customdata}<br>' + y1_y2_label + ': %{y}<extra></extra>'
+                        customdata=customdata_1_y2,
+                        hovertemplate='<b>Activité 1</b><br>Temps: %{customdata[0]}<br>' + y1_y2_label + ': %{customdata[1]}<extra></extra>'
                     ))
             
             act_id_2 = comparison_activity_id_2.get()
@@ -6014,16 +6725,19 @@ def server(input, output, session):
 
                     # Create formatted time labels for Activity 2
                     x2_formatted = [format_seconds_to_time(t) for t in x2]
+                    # Format Y values for Activity 2 (use same is_pace_y1 since same metric)
+                    y2_formatted = _fmt_hover_vals(y2, is_pace_y1, yvar)
 
                     # Primary Y-axis trace for Activity 2 (solid yellow/orange)
                     if len(x2) > 0:  # Only add trace if there's data
+                        customdata_2 = list(zip(x2_formatted, y2_formatted))
                         fig.add_trace(go.Scatter(
                             x=x2, y=y2, mode='lines',
                             line=dict(color='#F59E0B', width=2.5),  # Amber/orange color
                             name=f"Activité 2 - {y1_label}",
                             yaxis='y',
-                            customdata=x2_formatted,
-                            hovertemplate='<b>Activité 2</b><br>Temps: %{customdata}<br>' + y1_label + ': %{y}<extra></extra>'
+                            customdata=customdata_2,
+                            hovertemplate='<b>Activité 2</b><br>Temps: %{customdata[0]}<br>' + y1_label + ': %{customdata[1]}<extra></extra>'
                         ))
 
                     # Secondary Y-axis trace for Activity 2 (dashed yellow/orange) if selected
@@ -6038,14 +6752,18 @@ def server(input, output, session):
                         x2_y2 = [x for x, v in zip(x2_y2, valid_mask) if v]
                         y2_y2 = [y for y, v in zip(y2_y2, valid_mask) if v]
                         x2_y2_formatted = [format_seconds_to_time(t) for t in x2_y2]
+                        # Check if secondary Y-axis is pace for Activity 2
+                        is_pace_y2_act2 = yvar2 == "pace" or "Allure" in y2_y2_label
+                        y2_y2_formatted = _fmt_hover_vals(y2_y2, is_pace_y2_act2, yvar2)
                         if len(x2_y2) > 0:  # Only add trace if there's data
+                            customdata_2_y2 = list(zip(x2_y2_formatted, y2_y2_formatted))
                             fig.add_trace(go.Scatter(
                                 x=x2_y2, y=y2_y2, mode='lines',
                                 line=dict(color='#F59E0B', width=2.5, dash='dash'),
                                 name=f"Activité 2 - {y2_y2_label}",
                                 yaxis='y2',
-                                customdata=x2_y2_formatted,
-                                hovertemplate='<b>Activité 2</b><br>Temps: %{customdata}<br>' + y2_y2_label + ': %{y}<extra></extra>'
+                                customdata=customdata_2_y2,
+                                hovertemplate='<b>Activité 2</b><br>Temps: %{customdata[0]}<br>' + y2_y2_label + ': %{customdata[1]}<extra></extra>'
                             ))
             
             # Create custom tick values and labels
@@ -6106,39 +6824,54 @@ def server(input, output, session):
                 # Add pace formatting for secondary Y-axis if it's pace (min/km)
                 if yvar2 == "pace":
                     # Collect all y2 values to determine range
+                    # Filter to realistic running paces: 2:00/km to 10:00/km (120-600 sec/km)
+                    MIN_PACE = 120  # 2:00/km (very fast sprint)
+                    MAX_PACE = 600  # 10:00/km (slow jog/walk)
+
                     all_y2_values = []
                     if 'y1_y2' in locals() and y1_y2 is not None:
-                        all_y2_values.extend([v for v in y1_y2 if v is not None and not np.isnan(v)])
+                        all_y2_values.extend([v for v in y1_y2 if v is not None and not np.isnan(v) and MIN_PACE <= v <= MAX_PACE])
                     if 'y2_y2' in locals() and y2_y2 is not None:
-                        all_y2_values.extend([v for v in y2_y2 if v is not None and not np.isnan(v)])
+                        all_y2_values.extend([v for v in y2_y2 if v is not None and not np.isnan(v) and MIN_PACE <= v <= MAX_PACE])
 
                     if all_y2_values:
                         y2_min = min(all_y2_values)
                         y2_max = max(all_y2_values)
 
-                        # Generate pace tick values (e.g., 3:00, 3:30, 4:00, etc.)
+                        # Add some padding (10% on each side)
+                        y2_padding = (y2_max - y2_min) * 0.1
+                        y2_min = max(MIN_PACE, y2_min - y2_padding)
+                        y2_max = min(MAX_PACE, y2_max + y2_padding)
+
+                        # Generate pace tick values - only full minutes for cleaner display
                         y2_min_minutes = int(y2_min // 60)
                         y2_max_minutes = int(y2_max // 60) + 1
 
+                        # Choose tick interval based on range (aim for 4-6 ticks)
+                        num_minutes = y2_max_minutes - y2_min_minutes
+                        if num_minutes <= 4:
+                            tick_interval = 1  # Every minute
+                        elif num_minutes <= 8:
+                            tick_interval = 2  # Every 2 minutes
+                        else:
+                            tick_interval = max(1, num_minutes // 4)  # ~4 ticks
+
                         pace_ticks = []
-                        for minute in range(y2_min_minutes, y2_max_minutes + 1):
-                            pace_ticks.append(minute * 60)  # On the minute
-                            if minute < y2_max_minutes:
-                                pace_ticks.append(minute * 60 + 30)  # Half minute
+                        for minute in range(y2_min_minutes, y2_max_minutes + 1, tick_interval):
+                            pace_ticks.append(minute * 60)
 
-                        pace_ticks = [t for t in pace_ticks if y2_min <= t <= y2_max]
-
-                        # Format pace labels as MM:SS
-                        def format_pace(seconds):
+                        # Format pace labels as M:SS
+                        def format_pace_label(seconds):
                             minutes = int(seconds // 60)
                             secs = int(seconds % 60)
                             return f"{minutes}:{secs:02d}"
 
-                        pace_labels = [format_pace(t) for t in pace_ticks]
+                        pace_labels = [format_pace_label(t) for t in pace_ticks]
 
                         yaxis2_config['tickmode'] = 'array'
                         yaxis2_config['tickvals'] = pace_ticks
                         yaxis2_config['ticktext'] = pace_labels
+                        yaxis2_config['range'] = [y2_min, y2_max]  # Set explicit range to filter outliers
                         # NO reversal - slower pace (high value) at top, faster (low value) at bottom
 
                 layout_config['yaxis2'] = yaxis2_config
@@ -6151,7 +6884,7 @@ def server(input, output, session):
             for i, trace in enumerate(fig.data):
                 print(f"[DEBUG comparison_plot] Trace {i}: name='{trace.name}', x_len={len(trace.x) if trace.x is not None else 0}, y_len={len(trace.y) if trace.y is not None else 0}")
 
-            return fig
+            return plotly_to_html(fig)
         except Exception as e:
             print(f"[DEBUG comparison_plot] Exception: {str(e)}")
             import traceback
@@ -6168,7 +6901,7 @@ def server(input, output, session):
                 error_msg = "Erreur de configuration du graphique. Veuillez reessayer."
             fig.add_annotation(text=f"Erreur: {error_msg}", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False, font=dict(size=16, color="#dc2626"))
             fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False), height=600, plot_bgcolor="white")
-            return fig
+            return plotly_to_html(fig)
     
     # Comparison statistics card
     @output
@@ -7120,6 +7853,26 @@ def server(input, output, session):
             douleur_oui = input.daily_douleur_oui() == "Oui"
             modifs_oui = input.daily_modifs_oui() == "Oui"
 
+            # Parse pain selections from body picker (JSON string from JS)
+            pain_selections = {}
+            if douleur_oui:
+                try:
+                    pain_json = input.daily_pain_selections()
+                    if pain_json and str(pain_json).strip():
+                        pain_selections = json.loads(str(pain_json))
+                except Exception:
+                    pass
+
+            # Parse capacite_execution
+            capacite_val = None
+            if douleur_oui:
+                try:
+                    cap_raw = input.daily_capacite_execution()
+                    if cap_raw is not None and str(cap_raw).strip():
+                        capacite_val = int(cap_raw)
+                except Exception:
+                    pass
+
             data = {
                 "athlete_id": athlete_id,
                 "activity_id": activity_id,
@@ -7132,9 +7885,10 @@ def server(input, output, session):
 
                 # S3: Pain/discomfort
                 "douleur_oui": douleur_oui,
-                "douleur_intensite": int(input.daily_douleur_intensite()) if douleur_oui else None,
-                "douleur_type_zone": input.daily_douleur_type_zone() if douleur_oui and input.daily_douleur_type_zone() else None,
+                "douleur_intensite": None,
+                "douleur_type_zone": None,
                 "douleur_impact": input.daily_douleur_impact() == "Oui" if douleur_oui else None,
+                "capacite_execution": capacite_val,
 
                 # S4: Context
                 "en_groupe": input.daily_en_groupe() == "Oui",
@@ -7146,22 +7900,66 @@ def server(input, output, session):
                 "modifs_details": input.daily_modifs_details() if modifs_oui and input.daily_modifs_details() else None
             }
 
-            # Insert into database
+            # Insert into database - use return=representation to get back the UUID
             response = requests.post(
                 f"{SUPABASE_URL}/rest/v1/daily_workout_surveys",
                 headers={
                     "apikey": SUPABASE_KEY,
                     "Authorization": f"Bearer {SUPABASE_KEY}",
                     "Content-Type": "application/json",
-                    "Prefer": "return=minimal"
+                    "Prefer": "return=representation"
                 },
                 json=data
             )
 
             if response.status_code in [200, 201]:
+                # Insert pain entries into workout_pain_entries if any selected
+                survey_id = None
+                try:
+                    resp_data = response.json()
+                    if isinstance(resp_data, list) and len(resp_data) > 0:
+                        survey_id = resp_data[0].get("id")
+                except Exception:
+                    pass
+
+                if survey_id and pain_selections:
+                    pain_entries = []
+                    for composite_key, part_info in pain_selections.items():
+                        # Keys are "view:partId" (e.g. "front:left_knee")
+                        if ':' in composite_key:
+                            _, body_part = composite_key.split(':', 1)
+                        else:
+                            body_part = composite_key
+                        entry = {
+                            "survey_id": survey_id,
+                            "body_part": body_part,
+                            "body_view": part_info.get("view", "front"),
+                            "severity": int(part_info.get("severity", 1))
+                        }
+                        pain_entries.append(entry)
+
+                    if pain_entries:
+                        try:
+                            pain_resp = requests.post(
+                                f"{SUPABASE_URL}/rest/v1/workout_pain_entries",
+                                headers={
+                                    "apikey": SUPABASE_KEY,
+                                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                                    "Content-Type": "application/json",
+                                    "Prefer": "return=minimal"
+                                },
+                                json=pain_entries
+                            )
+                            if pain_resp.status_code not in [200, 201]:
+                                print(f"Warning: Failed to insert pain entries: {pain_resp.text}")
+                        except Exception as pe:
+                            print(f"Warning: Error inserting pain entries: {pe}")
+
+                pain_count = len(pain_selections)
+                pain_msg = f" | {pain_count} zone(s) de douleur enregistrée(s)" if pain_count > 0 else ""
                 daily_survey_save_status.set({
                     "success": True,
-                    "message": "Questionnaire enregistré avec succès!",
+                    "message": f"Questionnaire enregistré avec succès!{pain_msg}",
                     "data": data
                 })
             else:
@@ -7535,47 +8333,93 @@ def server(input, output, session):
 
     # Distance definitions
     DISTANCES = [
+        {"key": "400m", "label": "400 mètres", "format": "short"},
+        {"key": "800m", "label": "800 mètres", "format": "short"},
         {"key": "1000m", "label": "1000 mètres", "format": "short"},
         {"key": "1500m", "label": "1500 mètres", "format": "short"},
         {"key": "1mile", "label": "1 Mile / 1609m", "format": "short"},
+        {"key": "2000m", "label": "2000 mètres", "format": "short"},
         {"key": "3000m", "label": "3000 mètres", "format": "short"},
+        {"key": "2000m_steeple", "label": "2000m steeple", "format": "short"},
+        {"key": "3000m_steeple", "label": "3000m steeple", "format": "short"},
         {"key": "5000m", "label": "5000 mètres", "format": "long"},
         {"key": "10000m", "label": "10 000 mètres", "format": "long"},
-        {"key": "half_marathon", "label": "Semi-marathon 21.1km", "format": "long"}
+        {"key": "5km", "label": "5 km (route)", "format": "long"},
+        {"key": "10km", "label": "10 km (route)", "format": "long"},
+        {"key": "half_marathon", "label": "Semi-marathon 21.1km", "format": "long"},
+        {"key": "marathon", "label": "Marathon 42.2km", "format": "long"}
     ]
     
     def format_time_from_seconds(seconds, format_type="short"):
-        """Convert seconds to MM:SS or HH:MM:SS"""
+        """Convert seconds to MM:SS, HH:MM:SS, or with milliseconds if present"""
         if not seconds or seconds <= 0:
             return ""
-        
+
+        # Check if there are milliseconds
+        has_ms = (seconds % 1) > 0.0001  # Small tolerance for float precision
         total_sec = int(seconds)
+        ms = int(round((seconds - total_sec) * 1000)) if has_ms else 0
+
         hours = total_sec // 3600
         minutes = (total_sec % 3600) // 60
         secs = total_sec % 60
-        
+
         if format_type == "long" or hours > 0:
-            return f"{hours}:{minutes:02d}:{secs:02d}"
+            base = f"{hours}:{minutes:02d}:{secs:02d}"
         else:
-            return f"{minutes}:{secs:02d}"
+            base = f"{minutes}:{secs:02d}"
+
+        if has_ms and ms > 0:
+            return f"{base}:{ms:02d}"  # Display 2 digits for centiseconds
+        else:
+            return base
     
     def parse_time_to_seconds(time_str):
-        """Parse MM:SS or HH:MM:SS to total seconds"""
+        """Parse MM:SS, HH:MM:SS, MM:SS:ms, or HH:MM:SS:ms to total seconds (with decimals)"""
         if not time_str or time_str.strip() == "":
             return None
-        
+
         try:
             parts = time_str.strip().split(':')
             if len(parts) == 2:  # MM:SS
                 minutes, seconds = int(parts[0]), int(parts[1])
                 if seconds >= 60:
                     return None  # Invalid
-                return minutes * 60 + seconds
-            elif len(parts) == 3:  # HH:MM:SS
+                return float(minutes * 60 + seconds)
+            elif len(parts) == 3:
+                # Could be HH:MM:SS or MM:SS:ms
+                first, second, third = parts[0], parts[1], parts[2]
+                # If third part is > 59 or has leading zeros with length < 2, treat as milliseconds
+                if len(third) <= 2 and int(third) <= 59:
+                    # HH:MM:SS format
+                    hours, minutes, seconds = int(first), int(second), int(third)
+                    if minutes >= 60 or seconds >= 60:
+                        return None  # Invalid
+                    return float(hours * 3600 + minutes * 60 + seconds)
+                else:
+                    # MM:SS:ms format (milliseconds can be 1-3 digits)
+                    minutes, seconds = int(first), int(second)
+                    ms = int(third)
+                    # Normalize milliseconds to 3 digits
+                    if len(third) == 1:
+                        ms = ms * 100  # 1 -> 100ms
+                    elif len(third) == 2:
+                        ms = ms * 10   # 12 -> 120ms
+                    # else 3 digits, use as-is
+                    if seconds >= 60:
+                        return None  # Invalid
+                    return float(minutes * 60 + seconds) + (ms / 1000.0)
+            elif len(parts) == 4:  # HH:MM:SS:ms
                 hours, minutes, seconds = int(parts[0]), int(parts[1]), int(parts[2])
+                ms = int(parts[3])
+                # Normalize milliseconds
+                if len(parts[3]) == 1:
+                    ms = ms * 100
+                elif len(parts[3]) == 2:
+                    ms = ms * 10
                 if minutes >= 60 or seconds >= 60:
                     return None  # Invalid
-                return hours * 3600 + minutes * 60 + seconds
+                return float(hours * 3600 + minutes * 60 + seconds) + (ms / 1000.0)
             else:
                 return None
         except:
@@ -7584,13 +8428,21 @@ def server(input, output, session):
     def calculate_pace(distance_key, time_seconds):
         """Calculate pace in min/km"""
         distance_map = {
+            "400m": 0.4,
+            "800m": 0.8,
             "1000m": 1.0,
             "1500m": 1.5,
             "1mile": 1.609,
+            "2000m": 2.0,
             "3000m": 3.0,
+            "2000m_steeple": 2.0,
+            "3000m_steeple": 3.0,
             "5000m": 5.0,
             "10000m": 10.0,
-            "half_marathon": 21.1
+            "5km": 5.0,
+            "10km": 10.0,
+            "half_marathon": 21.1,
+            "marathon": 42.195
         }
 
         distance_km = distance_map.get(distance_key)
@@ -7634,25 +8486,22 @@ def server(input, output, session):
     @output
     @render.ui
     def manual_entry_content():
-        """Render manual data entry form - Both Personal Records and Training Zones"""
+        """Render manual data entry form - Events, Training Zones, and Personal Records"""
         # Check authentication
         if not is_authenticated.get():
             return ui.div()
 
-        role = user_role.get()
-
-        # Build content based on role
+        # Build content - all cards available to all users
         cards = []
 
-        # Personal Records Card (Athletes only)
-        if role == "athlete":
-            cards.append(personal_records_card())
-
-        # Lactate Tests Card (Both Coaches and Athletes)
+        # 1. Events Card (TOP) - lactate tests, races, and injuries
         cards.append(lactate_tests_card())
 
-        # Training Zones Card (Both Coaches and Athletes)
+        # 2. Training Zones Card (MIDDLE)
         cards.append(training_zones_card())
+
+        # 3. Personal Records Card (BOTTOM) - now available to all users
+        cards.append(personal_records_card())
 
         return ui.div(*cards)
 
@@ -7683,8 +8532,8 @@ def server(input, output, session):
             priority_id = f"pr_priority_{key}"
             notes_id = f"pr_notes_{key}"
 
-            # Placeholder - always HH:MM:SS
-            time_placeholder = "HH:MM:SS"
+            # Placeholder - supports HH:MM:SS or HH:MM:SS:ms
+            time_placeholder = "HH:MM:SS:ms"
 
             table_rows.append(
                 ui.tags.tr(
@@ -7701,7 +8550,7 @@ def server(input, output, session):
                         style="padding: 1rem; background: #fef2f2; vertical-align: middle;"
                     ),
                     ui.tags.td(
-                        ui.input_text(time_id, "", placeholder=time_placeholder, width="120px"),
+                        ui.input_text(time_id, "", placeholder=time_placeholder, width="140px"),
                         style="padding: 1rem; vertical-align: middle;"
                     ),
                     ui.tags.td(
@@ -7800,19 +8649,89 @@ def server(input, output, session):
                 style="margin-bottom: 1.5rem; padding: 1rem; background: #f9fafb; border-radius: 8px;"
             )
 
-        # Build table rows for existing tests
+        # Body part labels for injury display
+        body_part_labels = {
+            "head": "Tête", "neck": "Cou",
+            "left_shoulder": "Épaule gauche", "right_shoulder": "Épaule droite",
+            "left_arm": "Bras gauche", "right_arm": "Bras droit",
+            "chest": "Poitrine", "upper_back": "Dos haut", "lower_back": "Dos bas",
+            "left_hip": "Hanche gauche", "right_hip": "Hanche droite",
+            "left_thigh": "Cuisse gauche", "right_thigh": "Cuisse droite",
+            "left_knee": "Genou gauche", "right_knee": "Genou droit",
+            "left_calf": "Mollet gauche", "right_calf": "Mollet droit",
+            "left_shin": "Tibia gauche", "right_shin": "Tibia droit",
+            "left_ankle": "Cheville gauche", "right_ankle": "Cheville droite",
+            "left_foot": "Pied gauche", "right_foot": "Pied droit",
+            "other": "Autre"
+        }
+
+        # Build table rows for existing tests/events
         table_rows = []
         for test in current_tests:
             test_date = test.get("test_date", "")
             distance_m = test.get("distance_m", "")
             lactate = test.get("lactate_mmol", "")
+            test_type = test.get("test_type", "lactate")
+            race_time = test.get("race_time_seconds", None)
             test_id = test.get("id", "")
+            injury_location = test.get("injury_location", "")
+            injury_severity = test.get("injury_severity", 1)
+            injury_status = test.get("injury_status", "")
+
+            # Format type display and color based on type
+            if test_type == "race":
+                type_display = "Course"
+                type_color = "#F59E0B"  # Gold/Orange
+            elif test_type == "injury":
+                # Color based on severity for injuries
+                severity_colors = {"1": "#22c55e", "2": "#eab308", "3": "#ef4444"}  # Green, Yellow, Red
+                type_color = severity_colors.get(str(injury_severity), "#ef4444")
+                severity_labels = {"1": "Légère", "2": "Modérée", "3": "Sévère"}
+                type_display = severity_labels.get(str(injury_severity), "Douleur")
+            elif test_type == "speed_test":
+                type_display = "Vitesse"
+                type_color = "#10b981"  # Green
+            else:
+                type_display = "Lactate"
+                type_color = "#3B82F6"  # Blue
+
+            # Format value/info column based on type
+            if test_type == "speed_test":
+                speed_val = test.get("speed_ms")
+                if speed_val:
+                    value_display = f"{float(speed_val):.2f} m/s"
+                elif race_time and distance_m:
+                    value_display = f"{distance_m / race_time:.2f} m/s"
+                else:
+                    value_display = "-"
+                distance_display = f"{distance_m} m" if distance_m else "-"
+            elif test_type == "race" and race_time:
+                value_display = format_time_from_seconds(race_time)
+                distance_display = f"{distance_m} m" if distance_m else "-"
+            elif test_type == "injury":
+                location_label = body_part_labels.get(injury_location, injury_location)
+                status_labels = {"active": "Active", "recovering": "Récup.", "resolved": "Résolue"}
+                status_label = status_labels.get(injury_status, "")
+                value_display = f"{location_label}"
+                if status_label:
+                    value_display += f" ({status_label})"
+                distance_display = "-"
+            elif lactate:
+                value_display = f"{lactate} mmol/L"
+                distance_display = f"{distance_m} m" if distance_m else "-"
+            else:
+                value_display = "-"
+                distance_display = f"{distance_m} m" if distance_m else "-"
 
             table_rows.append(
                 ui.tags.tr(
+                    ui.tags.td(
+                        ui.tags.span(type_display, style=f"background: {type_color}; color: white; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.8rem;"),
+                        style="padding: 0.75rem; border-bottom: 1px solid #e5e7eb;"
+                    ),
                     ui.tags.td(str(test_date), style="padding: 0.75rem; border-bottom: 1px solid #e5e7eb;"),
-                    ui.tags.td(f"{distance_m} m", style="padding: 0.75rem; border-bottom: 1px solid #e5e7eb; text-align: center;"),
-                    ui.tags.td(f"{lactate} mmol/L", style="padding: 0.75rem; border-bottom: 1px solid #e5e7eb; text-align: center;"),
+                    ui.tags.td(distance_display, style="padding: 0.75rem; border-bottom: 1px solid #e5e7eb; text-align: center;"),
+                    ui.tags.td(value_display, style="padding: 0.75rem; border-bottom: 1px solid #e5e7eb; text-align: center;"),
                     ui.tags.td(
                         ui.input_action_button(
                             f"delete_lactate_{test_id}",
@@ -7825,13 +8744,13 @@ def server(input, output, session):
                 )
             )
 
-        # Empty state if no tests
+        # Empty state if no events
         if not table_rows:
             table_rows.append(
                 ui.tags.tr(
                     ui.tags.td(
-                        "Aucun test de lactate enregistré",
-                        colspan=4,
+                        "Aucun événement enregistré",
+                        colspan=5,
                         style="padding: 2rem; text-align: center; color: #666; font-style: italic;"
                     )
                 )
@@ -7840,8 +8759,8 @@ def server(input, output, session):
         return ui.card(
             ui.card_header(
                 ui.div(
-                    ui.tags.h3("Tests de lactate", style="margin: 0; color: #D92323;"),
-                    ui.tags.p("Enregistrez vos résultats de tests de lactate",
+                    ui.tags.h3("Événements", style="margin: 0; color: #D92323;"),
+                    ui.tags.p("Enregistrez vos tests de lactate, courses ou douleurs/blessures",
                              style="margin: 0.5rem 0 0 0; color: white; font-size: 1rem;"),
                     style="padding: 0.5rem 0;"
                 )
@@ -7858,25 +8777,42 @@ def server(input, output, session):
 
                 # New test entry form
                 ui.div(
-                    ui.tags.h4("Nouveau test", style="margin-bottom: 1rem; color: #333;"),
-                    ui.row(
-                        ui.column(4,
-                            ui.tags.label("Date du test", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
-                            ui.input_date("lactate_test_date", "", value=str(datetime.now().date()), width="100%")
+                    ui.tags.h4("Nouvelle entrée", style="margin-bottom: 1rem; color: #333;"),
+
+                    # Type selector (radio buttons) - now includes injury
+                    ui.div(
+                        ui.tags.label("Type", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
+                        ui.input_radio_buttons(
+                            "lactate_test_type",
+                            "",
+                            choices={"lactate": "Test de lactate", "race": "Course", "speed_test": "Test de vitesse max"},
+                            selected="lactate",
+                            inline=True
                         ),
-                        ui.column(4,
-                            ui.tags.label("Distance (mètres)", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
-                            ui.input_numeric("lactate_distance_m", "", value=None, min=100, max=50000, step=100, width="100%")
-                        ),
-                        ui.column(4,
-                            ui.tags.label("Lactate (mmol/L)", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
-                            ui.input_numeric("lactate_mmol", "", value=None, min=0.0, max=30.0, step=0.1, width="100%")
-                        )
+                        style="margin-bottom: 1rem;"
                     ),
+
+                    # Date (always shown)
+                    ui.div(
+                        ui.tags.label("Date", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
+                        ui.input_date("lactate_test_date", "", value=str(datetime.now().date()), width="100%"),
+                        style="margin-bottom: 1rem;"
+                    ),
+
+                    # Conditional fields (rendered dynamically based on type)
+                    ui.output_ui("lactate_conditional_fields"),
+
+                    # Notes field (always shown)
+                    ui.div(
+                        ui.tags.label("Notes (optionnel)", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
+                        ui.input_text_area("lactate_notes", "", placeholder="Conditions, sensations, équipement...", width="100%", rows=2),
+                        style="margin-top: 1rem;"
+                    ),
+
                     ui.div(
                         ui.input_action_button(
                             "save_lactate_test",
-                            "Ajouter le test",
+                            "Enregistrer",
                             class_="btn btn-primary",
                             style="background: #D92323; border: none; padding: 0.75rem 2rem; font-weight: 600; margin-top: 1rem;"
                         ),
@@ -7886,13 +8822,14 @@ def server(input, output, session):
                 ),
 
                 # Existing tests table
-                ui.tags.h4("Tests enregistrés", style="margin-bottom: 1rem; color: #333;"),
+                ui.tags.h4("Historique", style="margin-bottom: 1rem; color: #333;"),
                 ui.tags.table(
                     ui.tags.thead(
                         ui.tags.tr(
+                            ui.tags.th("Type", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; border-bottom: 2px solid #D92323;"),
                             ui.tags.th("Date", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; border-bottom: 2px solid #D92323;"),
                             ui.tags.th("Distance", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; text-align: center; border-bottom: 2px solid #D92323;"),
-                            ui.tags.th("Lactate", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; text-align: center; border-bottom: 2px solid #D92323;"),
+                            ui.tags.th("Info", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; text-align: center; border-bottom: 2px solid #D92323;"),
                             ui.tags.th("Actions", style="padding: 0.75rem; background: #f3f4f6; font-weight: 700; text-align: center; border-bottom: 2px solid #D92323;")
                         )
                     ),
@@ -8113,6 +9050,7 @@ def server(input, output, session):
     @reactive.event(is_authenticated)
     def load_personal_records():
         """Load current personal records from database"""
+        print("[DEBUG] load_personal_records called", flush=True)
         if not is_authenticated.get() or user_role.get() != "athlete":
             return
         
@@ -8257,6 +9195,7 @@ def server(input, output, session):
     @reactive.event(is_authenticated)
     def load_lactate_tests():
         """Load current lactate tests from database"""
+        print("[DEBUG] load_lactate_tests called", flush=True)
         if not is_authenticated.get():
             return
 
@@ -8297,6 +9236,90 @@ def server(input, output, session):
             print(f"Error loading lactate tests: {e}")
             lactate_tests_data.set([])
 
+    # Conditional fields for event type (lactate vs race vs injury)
+    @output
+    @render.ui
+    def lactate_conditional_fields():
+        """Render fields based on selected event type (lactate, race, or injury)"""
+        test_type = input.lactate_test_type() if hasattr(input, 'lactate_test_type') else "lactate"
+
+        if test_type == "race":
+            # Show distance and race time inputs for races
+            return ui.row(
+                ui.column(6,
+                    ui.tags.label("Distance (mètres)", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
+                    ui.input_numeric("lactate_distance_m", "", value=None, min=100, max=50000, step=100, width="100%")
+                ),
+                ui.column(6,
+                    ui.tags.label("Temps de course (HH:MM:SS ou MM:SS)", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
+                    ui.input_text("lactate_race_time", "", placeholder="ex: 42:30 ou 1:23:45", width="100%")
+                ),
+                style="margin-top: 1rem;"
+            )
+        elif test_type == "speed_test":
+            # Show distance, time, and auto-calculated speed for speed tests
+            return ui.div(
+                ui.row(
+                    ui.column(4,
+                        ui.tags.label("Distance (metres)", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
+                        ui.input_numeric("lactate_distance_m", "", value=None, min=10, max=1000, step=10, width="100%")
+                    ),
+                    ui.column(4,
+                        ui.tags.label("Temps (MM:SS:MS ou SS)", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
+                        ui.input_text("speed_test_time", "", placeholder="ex: 0:05:23 ou 5.2", width="100%")
+                    ),
+                    ui.column(4,
+                        ui.tags.label("Vitesse (m/s)", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
+                        ui.output_ui("speed_test_calculated"),
+                    ),
+                ),
+                style="margin-top: 1rem;"
+            )
+        else:
+            # Show lactate and distance inputs for lactate tests
+            return ui.row(
+                ui.column(6,
+                    ui.tags.label("Lactate (mmol/L)", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
+                    ui.input_numeric("lactate_mmol", "", value=None, min=0.0, max=30.0, step=0.1, width="100%")
+                ),
+                ui.column(6,
+                    ui.tags.label("Distance (mètres)", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
+                    ui.input_numeric("lactate_distance_m", "", value=None, min=100, max=50000, step=100, width="100%")
+                ),
+                style="margin-top: 1rem;"
+            )
+
+    # Auto-calculated speed for speed tests
+    @output
+    @render.ui
+    def speed_test_calculated():
+        """Reactively compute speed (m/s) from distance and time inputs."""
+        try:
+            dist = input.lactate_distance_m()
+            time_str = input.speed_test_time()
+            if dist and time_str and str(time_str).strip():
+                time_str = str(time_str).strip()
+                # Try parse as MM:SS first, then as raw seconds
+                time_seconds = parse_time_to_seconds(time_str)
+                if time_seconds is None:
+                    # Try parsing as raw seconds (e.g., "5.2")
+                    try:
+                        time_seconds = float(time_str)
+                    except ValueError:
+                        pass
+                if time_seconds and time_seconds > 0:
+                    speed = dist / time_seconds
+                    return ui.div(
+                        ui.tags.span(f"{speed:.2f} m/s", style="font-size: 1.2rem; font-weight: 700; color: #16a34a;"),
+                        style="padding-top: 0.3rem;"
+                    )
+        except Exception:
+            pass
+        return ui.div(
+            ui.tags.span("--", style="font-size: 1.2rem; color: #999;"),
+            style="padding-top: 0.3rem;"
+        )
+
     # Status message display for lactate tests
     @output
     @render.ui
@@ -8325,11 +9348,11 @@ def server(input, output, session):
 
         return ui.div()
 
-    # Handle save lactate test
+    # Handle save lactate test or race
     @reactive.Effect
     @reactive.event(input.save_lactate_test)
     def handle_save_lactate_test():
-        """Save new lactate test to database"""
+        """Save new lactate test or race result to database"""
         # Determine target athlete (coach uses selected athlete, athlete uses own ID)
         role = user_role.get()
         if role == "coach":
@@ -8345,28 +9368,91 @@ def server(input, output, session):
 
         try:
             # Get form values
+            test_type = input.lactate_test_type() if hasattr(input, 'lactate_test_type') else "lactate"
             test_date = input.lactate_test_date()
             distance_m = input.lactate_distance_m()
-            lactate_mmol = input.lactate_mmol()
+            notes = input.lactate_notes() if hasattr(input, 'lactate_notes') else ""
 
-            # Validate required fields
+            # Validate required fields (common to all types)
             if not test_date:
                 lactate_tests_save_status.set({"type": "error", "title": "Erreur", "message": "Veuillez sélectionner une date"})
                 return
-            if not distance_m:
-                lactate_tests_save_status.set({"type": "error", "title": "Erreur", "message": "Veuillez entrer une distance"})
-                return
-            if lactate_mmol is None:
-                lactate_tests_save_status.set({"type": "error", "title": "Erreur", "message": "Veuillez entrer une valeur de lactate"})
-                return
 
-            # Build record
+            # Build base record
             record = {
                 "athlete_id": athlete_id,
                 "test_date": str(test_date),
-                "distance_m": int(distance_m),
-                "lactate_mmol": float(lactate_mmol)
+                "test_type": test_type,
+                "notes": notes.strip() if notes else None
             }
+
+            # Type-specific validation and fields
+            if test_type == "lactate":
+                # Lactate test - require lactate value and distance
+                if not distance_m:
+                    lactate_tests_save_status.set({"type": "error", "title": "Erreur", "message": "Veuillez entrer une distance"})
+                    return
+                lactate_mmol = input.lactate_mmol() if hasattr(input, 'lactate_mmol') else None
+                if lactate_mmol is None:
+                    lactate_tests_save_status.set({"type": "error", "title": "Erreur", "message": "Veuillez entrer une valeur de lactate"})
+                    return
+                record["distance_m"] = int(distance_m)
+                record["lactate_mmol"] = float(lactate_mmol)
+                record["race_time_seconds"] = None
+                success_msg = f"Test du {test_date}: {distance_m}m - {lactate_mmol} mmol/L"
+
+            elif test_type == "race":
+                # Race - require distance, parse race time (optional but recommended)
+                if not distance_m:
+                    lactate_tests_save_status.set({"type": "error", "title": "Erreur", "message": "Veuillez entrer une distance"})
+                    return
+                race_time_str = input.lactate_race_time() if hasattr(input, 'lactate_race_time') else ""
+                race_time_seconds = None
+                if race_time_str and race_time_str.strip():
+                    race_time_seconds = parse_time_to_seconds(race_time_str.strip())
+                    if race_time_seconds is None:
+                        lactate_tests_save_status.set({"type": "error", "title": "Erreur", "message": "Format de temps invalide. Utilisez HH:MM:SS ou MM:SS"})
+                        return
+                record["distance_m"] = int(distance_m)
+                record["lactate_mmol"] = None
+                record["race_time_seconds"] = race_time_seconds
+                if race_time_seconds:
+                    time_display = format_time_from_seconds(race_time_seconds)
+                    success_msg = f"Course du {test_date}: {distance_m}m en {time_display}"
+                else:
+                    success_msg = f"Course du {test_date}: {distance_m}m"
+
+            elif test_type == "speed_test":
+                # Speed test - require distance and time
+                if not distance_m:
+                    lactate_tests_save_status.set({"type": "error", "title": "Erreur", "message": "Veuillez entrer une distance"})
+                    return
+                time_str = input.speed_test_time() if hasattr(input, 'speed_test_time') else ""
+                if not time_str or not str(time_str).strip():
+                    lactate_tests_save_status.set({"type": "error", "title": "Erreur", "message": "Veuillez entrer un temps"})
+                    return
+                time_str = str(time_str).strip()
+                # Parse as MM:SS first, then as raw seconds
+                time_seconds = parse_time_to_seconds(time_str)
+                if time_seconds is None:
+                    try:
+                        time_seconds = float(time_str)
+                    except ValueError:
+                        time_seconds = None
+                if time_seconds is None or time_seconds <= 0:
+                    lactate_tests_save_status.set({"type": "error", "title": "Erreur", "message": "Format de temps invalide. Utilisez MM:SS ou des secondes (ex: 5.2)"})
+                    return
+                speed_ms = distance_m / time_seconds
+                record["distance_m"] = int(distance_m)
+                record["lactate_mmol"] = None
+                record["race_time_seconds"] = round(time_seconds, 2)
+                record["speed_ms"] = round(speed_ms, 3)
+                time_display = format_time_from_seconds(time_seconds)
+                success_msg = f"Test de vitesse du {test_date}: {distance_m}m en {time_display} ({speed_ms:.2f} m/s)"
+
+            else:
+                lactate_tests_save_status.set({"type": "error", "title": "Erreur", "message": "Type d'événement non reconnu"})
+                return
 
             # Insert into database
             response = requests.post(
@@ -8381,10 +9467,14 @@ def server(input, output, session):
             )
 
             if response.status_code in [200, 201]:
+                if test_type == "race":
+                    title = "Course enregistrée"
+                else:
+                    title = "Test enregistré"
                 lactate_tests_save_status.set({
                     "type": "success",
-                    "title": "Test enregistré",
-                    "message": f"Test du {test_date}: {distance_m}m - {lactate_mmol} mmol/L"
+                    "title": title,
+                    "message": success_msg
                 })
                 # Reload tests
                 load_lactate_tests()
@@ -8394,7 +9484,7 @@ def server(input, output, session):
                     lactate_tests_save_status.set({
                         "type": "error",
                         "title": "Erreur",
-                        "message": "Un test avec cette date et distance existe déjà"
+                        "message": "Une entrée avec cette date et distance existe déjà"
                     })
                 else:
                     lactate_tests_save_status.set({
@@ -8543,6 +9633,7 @@ def server(input, output, session):
     @reactive.event(is_authenticated, zones_selected_athlete)
     def load_training_zones():
         """Load most recent training zones from database"""
+        print("[DEBUG] load_training_zones called", flush=True)
         if not is_authenticated.get():
             return
 

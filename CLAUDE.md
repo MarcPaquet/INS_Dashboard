@@ -2,8 +2,8 @@
 
 **Project:** Intervals.icu → Supabase Data Ingestion System
 **Team:** Saint-Laurent Sélect Running Club
-**Last Updated:** January 16, 2026 (CRASH DEBUGGING SESSION)
-**Status:** ❌ **PRODUCTION DOWN** - App crashes after login, needs database rollback
+**Last Updated:** February 12, 2026 (METRIC ROUNDING)
+**Status:** ✅ **FULLY AUTOMATED** - Dashboard + Daily Lambda Cron Running
 
 ---
 
@@ -14,7 +14,21 @@
 | **Marc (Owner)** | Update after each session. Keep CONTEXT current, move completed tasks to ARCHIVE. |
 | **Claude Code** | Read CONTEXT first, check BACKLOG for priorities, reference ARCHIVE for history. |
 
-**Note:** For detailed archive information (full implementation details, code changes, debugging sessions), also read `ARCHIVE_DETAILED.md`.
+### When to Use ARCHIVE_DETAILED.md
+
+| Situation | Use CLAUDE.md | Use ARCHIVE_DETAILED.md |
+|-----------|---------------|-------------------------|
+| **Quick context on project status** | ✅ | |
+| **Current priorities and backlog** | ✅ | |
+| **Summary of what was done** | ✅ | |
+| **Debugging a similar issue** | | ✅ (has error messages, solutions) |
+| **Updating Lambda code** | | ✅ (has build commands, config) |
+| **Understanding implementation details** | | ✅ (has code snippets, architecture) |
+| **Replicating a previous setup** | | ✅ (has step-by-step details) |
+| **Sports science metrics reference** | | ✅ (has full metric definitions) |
+| **Database schema deep-dive** | | ✅ (has detailed table structures) |
+
+**Rule of thumb:** CLAUDE.md tells you *what* was done; ARCHIVE_DETAILED.md tells you *how* it was done.
 
 ---
 
@@ -94,7 +108,7 @@ Better Training Decisions
 | Alex Larochelle | `i453408` | athlete |
 | Alexandrine Coursol | `i454587` | athlete |
 | Doan Tran | `i453651` | athlete |
-| Jade Essabar | `jadeessabar` | athlete |
+| Jade Essabar | `i453683` | athlete |
 | Marc-Andre Trudeau Perron | `i453625` | athlete |
 | Marine Garnier | `i197667` | athlete |
 | Myriam Poirier | `i453790` | athlete |
@@ -102,17 +116,15 @@ Better Training Decisions
 | Robin Lefebvre | `i453411` | athlete |
 | Yassine Aber | `i453944` | athlete |
 | Evans Stephen | `i454589` | athlete |
-| Ilyass Kasmi | `i248571` | athlete |
-| Emma Veilleux | `i172048` | athlete |
+| Cedrik Flipo | `i486574` | athlete |
+| Renaud Bordeleau | `i482119` | athlete |
 
-**Login-Only Athletes (5) - No data import:**
+**Login-Only Athletes (3) - No data import:**
 | Member | Intervals.icu ID | Note |
 |--------|------------------|------|
-| Cedrik Flipo | - | No Intervals.icu |
 | Genevieve Paquin | - | No Intervals.icu |
-| Renaud Bordeleau | - | No Intervals.icu |
 | Simone Plourde | - | No Intervals.icu |
-| Elie Nayrand | `i453407` | **API KEY PENDING** |
+| Elie Nayrand | `i453407` | **API KEY ERROR** |
 
 **Coach (1 shared account for Samuel & Kerrian):**
 | Login | Password | Role |
@@ -176,169 +188,68 @@ Better Training Decisions
 | `moving_time.py` | Moving time calculations |
 | `auth_utils.py` | Password hashing |
 | `athletes.json.local` | Athlete API keys (not in git) |
+| `lambda/lambda_function.py` | AWS Lambda handler |
+| `lambda/aws_secrets_loader.py` | Secrets Manager integration |
+| `lambda/build_lambda.sh` | Lambda deployment build script |
 
 ---
 
 ## 📍 CURRENT STATE
 
-### 🔴 PRODUCTION DOWN - CRASH AFTER LOGIN
+### ✅ PRODUCTION LIVE + AUTOMATED
 
 | Component | Status | Details |
 |-----------|--------|---------|
-| **Dashboard** | ❌ CRASHING | Disconnects ~2 seconds after login |
-| **Database** | ⚠️ Unknown | May have RLS/permission issues |
-| **Authentication** | ✅ Working | Login modal works, crash happens after |
+| **Dashboard** | ✅ Working | All graphs render, login works |
+| **Database** | ✅ Working | All queries functioning |
+| **Authentication** | ✅ Working | Login modal, session management |
 | **Ingestion Script** | ✅ Validated | Tested Nov 29, 2025 - all checks passed |
 | **Mobile Design** | ✅ Responsive | All breakpoints working |
+| **AWS Lambda Cron** | ✅ Running | Daily 6 AM ET, 18/18 athletes success |
+| **Bulk Import** | ✅ Complete | EC2 terminated, data imported |
 
-### 📊 Data Statistics (as of Nov 29, 2025)
+### 📊 Data Statistics (as of Jan 18, 2026)
 
 | Metric | Count |
 |--------|-------|
-| Activities | 970 (956 historical + 14 recent test) |
+| Activities | 970+ (bulk import in progress) |
 | GPS Records | 2.5M+ points |
-| Intervals | 10,398 |
+| Intervals | 10,398+ |
 | Weather Coverage | 100% (outdoor activities) |
 | HR Coverage | 100% (when monitor used) |
 
-### 🔧 Recent Session (Jan 16, 2026) - CRITICAL ISSUE
+### 🔧 Recent Session (Jan 18, 2026) - CRASH RESOLVED
 
-**🚨 PRODUCTION CRASH - NEEDS DEBUGGING**
+**✅ SHINYWIDGETS CRASH FIX**
 
-App crashes with "Disconnected from the server" approximately 2 seconds after any user logs in. This started after deploying Phase 3B features and running security migrations.
-
----
-
-## TROUBLESHOOTING SUMMARY (For Next Session)
-
-### What Happened (Timeline)
-
-1. **Phase 3B Features Implemented** (commits 699c370, b0a3263, 299c1cc):
-   - Lactate/Race toggle in form
-   - Race visualization with markers on graphs
-   - All code committed to GitHub
-
-2. **Migrations Run by User:**
-   - ✅ `add_lactate_test_type.sql` - Added test_type and race_time columns to lactate_tests
-   - ✅ `fix_security_issues.sql` - RLS policies and function search_path changes
-
-3. **Crash Started:** App disconnects ~2 seconds after login for ANY user
-
-### Troubleshooting Steps Attempted
-
-| Step | Action | Result |
-|------|--------|--------|
-| 1 | Added try-except around race selector code | Still crashes |
-| 2 | Simplified race_selector_dropdown to return static message | Still crashes |
-| 3 | Rolled back to pre-race code (commit 9c31d1c) | Still crashes |
-| 4 | Ran `rollback_security_issues.sql` (drop blocking policies) | Still crashes |
-| 5 | Ran `rollback_security_v2.sql` (DISABLE RLS entirely) | Still crashes |
-| 6 | Deployed Dec 23 version (9c31d1c) without race features | Still crashes |
-
-### Key Finding
-
-**The crash persists even with old code that was definitely working before.**
-
-This means the issue is NOT the new race feature code - it's something in the database or environment.
-
-### SQL Migrations Run Today
-
-**1. `add_lactate_test_type.sql`:**
-```sql
-ALTER TABLE lactate_tests ADD COLUMN test_type TEXT NOT NULL DEFAULT 'lactate';
-ALTER TABLE lactate_tests ADD COLUMN race_time_seconds DECIMAL(10,2) NULL;
-ALTER TABLE lactate_tests ALTER COLUMN lactate_mmol DROP NOT NULL;
--- Plus constraints and index
-```
-
-**2. `fix_security_issues.sql`:**
-```sql
--- Enabled RLS on activity_zone_time and weekly_monotony_strain
--- Created blocking policies with USING(false) on 3 tables
--- Set search_path = '' on 10 functions
--- Revoked SELECT on materialized views from anon/authenticated
-```
-
-**3. Rollback Attempts:**
-```sql
--- rollback_security_v2.sql (RUN):
-DROP POLICY IF EXISTS "Block direct API access to activity_zone_time" ON activity_zone_time;
-DROP POLICY IF EXISTS "Block direct API access to weekly_monotony_strain" ON weekly_monotony_strain;
-DROP POLICY IF EXISTS "Block direct API access to lactate_tests" ON lactate_tests;
-ALTER TABLE activity_zone_time DISABLE ROW LEVEL SECURITY;
-ALTER TABLE weekly_monotony_strain DISABLE ROW LEVEL SECURITY;
-ALTER TABLE lactate_tests DISABLE ROW LEVEL SECURITY;
-GRANT SELECT ON activity_pace_zones TO anon, authenticated, service_role;
-GRANT SELECT ON weekly_zone_time TO anon, authenticated, service_role;
-```
-
-### Current State
-
-| Item | State |
-|------|-------|
-| **Git branch** | main |
-| **Deployed code** | Dec 23 version (9c31d1c) - OLD version without race features |
-| **Local supabase_shiny.py** | Dec 23 version (checked out from 9c31d1c) |
-| **Race feature code** | Saved in commits 699c370, b0a3263, 299c1cc |
-| **Database** | Has new columns from add_lactate_test_type.sql |
-| **RLS** | Disabled on activity_zone_time, weekly_monotony_strain, lactate_tests |
-
-### Files Created During Troubleshooting
-
-| File | Purpose |
-|------|---------|
-| `migrations/fix_security_issues.sql` | Original security migration (caused issues) |
-| `migrations/rollback_security_issues.sql` | First rollback attempt |
-| `migrations/rollback_security_v2.sql` | Aggressive rollback (DISABLE RLS) |
-
-### Next Session: Investigation Plan
-
-1. **Check Supabase Dashboard:**
-   - Look at database logs for errors
-   - Check if any queries are failing
-   - Verify table permissions in Auth settings
-
-2. **Test Database Connection:**
-   - Run simple SELECT queries in Supabase SQL Editor
-   - Verify service_role key still works
-   - Check if any tables are inaccessible
-
-3. **Check Function Search Paths:**
-   - The security migration set `search_path = ''` on 10 functions
-   - This might break function calls that don't use schema-qualified names
-   - May need to revert: `ALTER FUNCTION xxx RESET search_path;`
-
-4. **Verify All Tables Accessible:**
-   ```sql
-   SELECT 'activity_metadata' as t, COUNT(*) FROM activity_metadata
-   UNION ALL SELECT 'activity', COUNT(*) FROM activity
-   UNION ALL SELECT 'wellness', COUNT(*) FROM wellness
-   UNION ALL SELECT 'athlete', COUNT(*) FROM athlete
-   UNION ALL SELECT 'users', COUNT(*) FROM users;
-   ```
-
-5. **Check ShinyApps.io Logs:**
-   - Go to shinyapps.io dashboard → Logs
-   - Look for Python errors/exceptions
-
-6. **If All Else Fails:**
-   - Consider restoring Supabase to a point-in-time backup (if available)
-   - Or manually undo ALL changes from fix_security_issues.sql
-
-### Commands to Restore Race Features (After Fix)
-
-```bash
-# Restore the race feature code
-git checkout 299c1cc -- supabase_shiny.py
-
-# Or restore from stash (if still available)
-git stash list
-git stash pop
-```
+The crash that occurred after login was caused by `shinywidgets` library incompatibility with ShinyApps.io Python environment. Fixed by converting all Plotly graphs from `@render_plotly` + `output_widget()` to `@render.ui` + Plotly HTML rendering. See Phase 3C in Archive for details.
 
 ---
 
-## Phase 3B Features (IMPLEMENTED BUT NOT DEPLOYED DUE TO CRASH)
+## CRASH RESOLUTION SUMMARY (Jan 18, 2026)
+
+### Root Cause
+The `shinywidgets` library (`output_widget`, `@render_plotly`) is incompatible with ShinyApps.io's Python environment. It works locally but crashes on production ~2 seconds after login when any Plotly graph tries to render.
+
+### Solution (Phase 3C)
+Converted all Plotly graphs from shinywidgets rendering to HTML rendering:
+- Commented out `from shinywidgets import output_widget, render_plotly`
+- Created `plotly_to_html()` helper function using `fig.to_html()`
+- Changed all `@render_plotly` decorators to `@output` + `@render.ui`
+- Changed all `output_widget("name")` to `ui.output_ui("name")`
+- All 7 graph functions now return `plotly_to_html(fig)` instead of `fig`
+
+### What Was NOT the Cause
+- Database RLS policies
+- SQL function search_path changes
+- Security migrations
+- Race feature code (Phase 3B)
+
+All previous troubleshooting around database issues was a red herring - the root cause was the shinywidgets library itself.
+
+---
+
+## Phase 3B Features (NOW DEPLOYED)
 
 **Feature 1: Lactate Test vs Race Toggle**
 - ✅ Created database migration: `migrations/add_lactate_test_type.sql`
@@ -375,42 +286,526 @@ git stash pop
 
 ---
 
-### Previous Session (Jan 16, 2026 - Morning)
+### Current Session (Feb 12, 2026) - METRIC ROUNDING
 
-**AWS Infrastructure Setup - IN PROGRESS**
+**Session Summary:**
+1. Cataloged all numeric metrics displayed in the dashboard
+2. Rounded CTL/ATL/TSB to 1 decimal in hover tooltips
+3. Rounded Vertical Oscillation to 1 decimal in XY graph and comparison hover
+4. Rounded LSS to 2 decimals in XY graph and comparison hover
+5. Confirmed rounding should be frontend-only (not ingestion)
 
-Started AWS infrastructure setup for automated data ingestion. Completed Secrets Manager, IAM, and EC2 launch. Paused before configuring EC2 environment.
+**Design Decision: Frontend Rounding, Not Ingestion**
+
+- **CTL/ATL/TSB** are calculated in the dashboard via EWM — they don't exist in the database, so ingestion rounding is not applicable
+- **Vertical Oscillation & LSS** are raw sensor data stored in the `activity` table. Keeping full precision in the DB preserves accuracy for future analytics/correlations. Rounding is purely a display concern
+
+**Changes (`supabase_shiny.py`):**
+
+| Location | Metric | Before | After |
+|----------|--------|--------|-------|
+| `run_duration_trend()` ~line 3910 | CTL hover | Raw float (`42.38291746382`) | `.1f` (`42.4`) |
+| `run_duration_trend()` ~line 3921 | ATL hover | Raw float | `.1f` |
+| `run_duration_trend()` ~line 3929 | TSB hover | Raw float | `.1f` |
+| `plot_xy()` ~line 5277 | Vertical Oscillation hover | Raw float (`82.199997`) | `.1f` (`82.2`) |
+| `plot_xy()` ~line 5277 | LSS hover | Raw float (`9.83456`) | `.2f` (`9.83`) |
+| `comparison_plot()` ~line 6653 | All comparison hovers | `.1f` for all non-pace | Variable-specific via `_fmt_hover_vals()` |
+
+**Implementation Details:**
+- Added `hovertemplate` with `%{y:.1f}` to CTL/ATL/TSB `go.Scatter()` traces
+- Created `_hover_format` dict in `plot_xy()` mapping variable names to format strings
+- Created `_fmt_hover_vals()` helper in `comparison_plot()` for consistent formatting
+- Both primary and secondary Y-axis traces are covered in XY graph and comparison graph
+
+**Deployed:** Dashboard live on production (commit `90dd2cf`)
+- GitHub: Pushed to `main` (21 files, +4837/-636 lines — includes all Phases 3E-3I)
+- ShinyApps.io: Deployed successfully to https://insquebec-sportsciences.shinyapps.io/saintlaurentselect_dashboard/
+- Lambda source files (`lambda/`) now tracked in git (excluding `package/` and `.zip`)
+
+---
+
+### Previous Session (Feb 8, 2026) - MULTI-FEATURE SESSION (2 parts)
+
+**Session Summary (Part 1):**
+1. Fixed zone error ("Invalid value '0' for dtype 'str'")
+2. Per-athlete sync button (athletes sync only themselves, coaches sync all)
+3. Added maximal speed test event type to Events card
+4. Body picker in daily questionnaire (front+back SVG, multi-select, capacité d'exécution 0-3)
+5. LSS troubleshooting (Intervals.icu API strips Stryd developer fields)
+6. Prevention staff login added to to-do list
+
+**Session Summary (Part 2 - Same Day):**
+7. Fixed body picker click handlers (SVG parts were not clickable)
+8. Made front/back body parts independent (no cross-selection)
+9. Removed pain intensity slider from questionnaire (redundant with per-part severity)
+10. Added dots toggle on "Allure vs Fréquence cardiaque" graph
+11. Removed injury type from Events card (pain tracking is in questionnaire only)
+12. Added milliseconds support to speed test time input label
+
+---
+
+**Feature 1: Zone Error Fix**
+
+**Problem:** "Invalid value '0' for dtype 'str'" in "Résumé de période" tab zone graph.
+
+**Root Cause:** `pandas DataFrame.reindex(fill_value=0)` at line ~4500 attempted to fill ALL columns including `athlete_id` (string) with integer 0.
+
+**Fix:** Drop non-numeric columns before reindexing:
+```python
+non_numeric_cols = weekly_df.select_dtypes(exclude='number').columns.difference(["week_start"])
+weekly_df = weekly_df.drop(columns=non_numeric_cols, errors="ignore")
+weekly_df = weekly_df.set_index("week_start").reindex(full_weeks, fill_value=0).reset_index()
+weekly_df = weekly_df.rename(columns={"index": "week_start"})
+```
+
+**File:** `supabase_shiny.py` line ~4500
+
+---
+
+**Feature 2: Per-Athlete Sync Button**
+
+**Goal:** Athletes sync only their own data. Coaches sync everyone.
+
+**Dashboard Changes (`supabase_shiny.py`):**
+- In `handle_refresh_data()`: Check `user_role.get()` and `user_name.get()`
+- If athlete: sends `json={"athlete_name": "Name"}` to Lambda
+- If coach: sends `json={}` (empty = sync all, backward compatible)
+- Status message: "vos données" for athletes vs "tous les athlètes" for coaches
+
+**Lambda Changes (`lambda/lambda_function.py`):**
+- Parses optional `athlete_name` from HTTP request body
+- Filters athlete list if present (exact match, then case-insensitive fallback)
+- Returns 404 if athlete not found
+- Empty body = process all athletes (backward compatible with EventBridge cron)
+
+**Tested:**
+- Single athlete: 5.5s, 188 MB → 1/1 success
+- All athletes: 83s, 211 MB → 18/18 success
+
+**Lambda needs redeployment:** `cd lambda/ && ./build_lambda.sh` → Upload ZIP to AWS Console
+
+---
+
+**Feature 3: Maximal Speed Test Event Type**
+
+**Goal:** New "Test de vitesse max" event type (e.g., 40m sprint) with auto-calculated m/s.
+
+**Database Migration (`migrations/add_speed_test_event.sql`):**
+- Added `speed_ms` DECIMAL(6,3) column to `lactate_tests`
+- Updated `test_type` CHECK: `IN ('lactate', 'race', 'injury', 'speed_test')`
+- Updated `chk_race_time_only_for_races`: allows `race_time_seconds` for speed_test
+- Added `chk_speed_only_for_speed_tests`: `speed_ms` only for speed_test
+- Updated `chk_distance_required`: distance required for speed_test too
+- Created partial index `idx_lactate_tests_speed`
+
+**Dashboard Changes (`supabase_shiny.py`):**
+- Type radio buttons: Added `"speed_test": "Test de vitesse max"`
+- Conditional fields for speed_test: Distance (10-1000m) + Time (MM:SS or raw seconds)
+- `speed_test_calculated()` render function: Auto-calculates and displays "X.XX m/s"
+- Save handler: Validates, parses time, calculates `speed_ms = distance / time_seconds`
+- Results table: Green "Vitesse" badge, displays speed in m/s
+
+**Reuses existing:** `parse_time_to_seconds()`, `format_time_from_seconds()` functions
+
+---
+
+**Feature 4: Body Picker in Daily Questionnaire**
+
+**Goal:** Replace text input for pain location with front+back SVG body pickers (multi-select) and add 0-3 training execution capacity scale.
+
+**Database Migration (`migrations/create_workout_pain_entries.sql`):**
+- New table `workout_pain_entries`:
+  - `id` UUID PK
+  - `survey_id` UUID FK → `daily_workout_surveys(id)` ON DELETE CASCADE
+  - `body_part` TEXT (e.g., 'left_knee')
+  - `body_view` TEXT CHECK ('front' or 'back')
+  - `severity` INTEGER (1-3)
+  - RLS enabled with allow-all policy
+- New column on `daily_workout_surveys`:
+  - `capacite_execution` INTEGER (0-3, nullable)
+
+**Dashboard Changes (`supabase_shiny.py`):**
+
+*UI (lines ~2827-2850 replaced):*
+- Dual SVG body picker (front + back views side by side)
+- Front view: head, neck, shoulders, arms, chest, abdomen, hips, quads, knees, shins, ankles, feet
+- Back view: head, neck, shoulders, arms, upper_back, lower_back, glutes, hamstrings, knees, calves, ankles, feet
+- Multi-select JavaScript: click toggles selection, severity per part (1-3 color coding)
+- Event delegation on `document` for reliable click handling (not direct listeners)
+- Composite keys `view:partId` (e.g., `front:left_knee`) for independent front/back selection
+- Selected parts list below SVGs with per-part severity dropdowns and remove buttons
+- `Shiny.setInputValue('daily_pain_selections', JSON.stringify(selections))` for JS→Python sync
+- Removed `douleur_intensite` slider (redundant with per-part severity 1-3)
+- Added `capacite_execution` radio buttons:
+  - 0: Entraînement non complété
+  - 1: Fortement limité
+  - 2: Partiellement limité
+  - 3: Pleine capacité (aucune limitation)
+- Kept existing `douleur_impact` Yes/No radio
+
+*Submission handler (`handle_daily_survey_submit()`):*
+- Changed `"Prefer": "return=minimal"` to `"Prefer": "return=representation"` to get survey UUID
+- Parses `input.daily_pain_selections()` JSON string
+- Inserts one row per selected body part into `workout_pain_entries` (batch insert)
+- Stores `capacite_execution` in main survey row
+- Sets `douleur_type_zone` to `None` (deprecated, replaced by structured data)
+
+---
+
+**Feature 5: LSS Troubleshooting (Investigation)**
+
+**Findings:**
+- Database: 2.4M rows LSS > 0, 515K rows LSS = 0, 3.2M rows LSS NULL
+- Only 2 athletes have any LSS data (Matthew Beaudet, Kevin A. Robertson)
+- Downloaded FIT files from Intervals.icu API → `developer_data_id` messages exist but NO `field_description` messages
+- **Conclusion:** Intervals.icu API strips Stryd developer data from FIT file exports
+- LSS data only comes from watch sync directly (not via Intervals.icu API)
+- The zeros are legitimate data points where no valid stride was detected
+- **No code fix possible** - this is an API limitation
+
+**File investigated:** `intervals_hybrid_to_supabase.py` line 1162: `elif field.name == 'Leg Spring Stiffness'`
+
+---
+
+**Feature 6: Prevention Staff Login (To-Do)**
+
+Added to to-do list for future implementation:
+- New role for physiotherapy/prevention staff
+- Restricted dashboard access (injury data only)
+- Notion MCP not available during session - noted for manual addition
+
+---
+
+**Feature 7: Body Picker Click Fix**
+
+**Problem:** SVG body parts in the daily questionnaire were visible but not clickable. No selections appeared.
+
+**Root Cause:** The JavaScript click handlers were inside a `<script>` tag within `ui.HTML()`. When Shiny injects HTML via `innerHTML`, browsers do **not execute** `<script>` tags (standard browser security behavior). The SVG elements rendered correctly, but no click handlers were attached.
+
+**Fix:**
+1. Moved the JavaScript out of `ui.HTML('''...''')` into a separate `ui.tags.script("""...""")` element (which Shiny properly executes)
+2. Replaced direct `querySelectorAll().forEach(addEventListener)` with **event delegation** on `document` — works regardless of when SVG elements appear in the DOM
+3. Added `if (window._dailyBPInitialized) return;` guard to prevent double initialization
+
+**Code Location:** `supabase_shiny.py` lines ~2902-2989
+
+---
+
+**Feature 8: Independent Front/Back Body Parts**
+
+**Problem:** Clicking a body part (e.g., "left knee") on the front view also highlighted the same part on the back view, because both used the same `data-part` key.
+
+**Fix:** Changed JavaScript selection keys from `partId` (e.g., `left_knee`) to composite keys `view:partId` (e.g., `front:left_knee`, `back:left_knee`). Each view's selections are now fully independent.
+
+**Changes:**
+- **JS click handler:** Creates composite key `view + ':' + partId`
+- **JS render function:** Matches SVG elements by determining their parent `[data-view]` and building composite key
+- **JS selected list:** Parses composite key to extract `partId` for label lookup
+- **Python submission handler:** Parses composite key (`front:left_knee` → `body_part="left_knee"`, `body_view="front"`) — backward compatible with old format
+
+**Code Location:** `supabase_shiny.py` lines ~2902-2989 (JS), lines ~7898-7912 (Python handler)
+
+---
+
+**Feature 9: Removed Pain Intensity Slider**
+
+Removed the "Intensité de la douleur" 0-10 slider from the daily questionnaire pain section. It was redundant since each body part already has its own severity (1-3: Légère, Modérée, Sévère).
+
+**Changes:**
+- Removed `scale_with_tooltip("Intensite de la douleur", ui.input_slider(...))` from UI
+- Set `douleur_intensite` to `None` in submission handler (column still exists in DB for backward compatibility)
+
+---
+
+**Feature 10: Pace/HR Dots Toggle**
+
+**Goal:** Reduce visual noise on "Allure vs Fréquence cardiaque — par mois" graph when viewing old data with many data points.
+
+**Changes:**
+- Added `ui.input_checkbox("show_pace_hr_dots", "Afficher les points", value=True)` inside the card
+- Scatter point traces only added when checkbox is checked (default: on)
+- Trend lines always visible
+- When dots hidden, trend line legend entries become visible (so user can identify months)
+
+**Code Location:** `supabase_shiny.py` line ~2622 (UI), lines ~4132-4167 (graph logic)
+
+---
+
+**Feature 11: Removed Injury Type from Events Card**
+
+Removed "Douleur/Blessure" option from the Events card ("Entrée de données manuelle" tab). Pain/injury tracking is now exclusively in the daily questionnaire body picker.
+
+**What was removed:**
+- "injury" choice from `lactate_test_type` radio buttons (now 3 types: Lactate, Course, Vitesse max)
+- Entire `elif test_type == "injury"` block in `lactate_conditional_fields()` (~180 lines: SVG body picker, location dropdown, severity selector, status selector)
+- Injury validation and record building in save handler
+- Injury-specific success title
+
+**Kept:** Existing injury records still display correctly in the results table (backward compatible)
+
+---
+
+**Feature 12: Speed Test Milliseconds Label**
+
+Updated the speed test time input label from "Temps (MM:SS ou SS)" to "Temps (MM:SS:MS ou SS)" and placeholder from "ex: 0:05 ou 5.2" to "ex: 0:05:23 ou 5.2". The `parse_time_to_seconds()` function already supported `MM:SS:ms` format — only the label needed updating.
+
+---
+
+**Files Modified (Part 2):**
+
+| File | Changes |
+|------|---------|
+| `supabase_shiny.py` | Body picker JS fix (event delegation), composite keys, removed pain slider, dots toggle, removed injury from Events card, speed test label |
+
+**Deployed:** Dashboard live on production (2 deployments in Part 2).
+
+---
+
+### Previous Session (Feb 2, 2026) - EVENTS CARD + INJURY TRACKING
+
+**Session Summary:**
+1. Restructured "Entrée de données manuelle" tab with new card order
+2. Added injury/pain tracking with interactive SVG body picker (Events card)
+3. Extended lactate_tests table to support injuries as events
+4. Made all cards available to all users (removed role restrictions)
+
+**Key Changes:**
+- Card order: Events (TOP) → Training Zones → Personal Records (BOTTOM)
+- Renamed "Tests et courses" → "Événements"
+- SVG body picker for injury location (22 zones, 3 severity levels)
+- Extended `test_type` CHECK to include 'injury'
+- Added columns: `injury_location`, `injury_severity`, `injury_status`
+- **Migration:** `migrations/extend_lactate_tests_for_injuries.sql`
+- **Deployed:** Live on production
+
+---
+
+### Previous Session (Jan 30, 2026) - SYNC BUTTON + SECURITY FIXES
+
+**Session Summary:**
+1. Fixed all Supabase linter security errors and warnings
+2. Added manual "Sync" button to trigger data refresh from dashboard
+3. Implemented rate limiting (3 syncs per day)
+4. UI styling fixes (button borders)
+
+---
+
+**Feature 1: Supabase Security Fixes**
+
+Fixed all linter errors and warnings:
+
+| Category | Count | Fix |
+|----------|-------|-----|
+| RLS disabled on tables | 3 | Enabled RLS + policies |
+| Function search_path mutable | 10 | Set `search_path = public` |
+| Materialized views in API | 2 | Revoked anon/authenticated access |
+| RLS policies always true | 3 | Service-role specific policies |
+
+**Migrations Created:**
+- `migrations/enable_rls_missing_tables.sql`
+- `migrations/fix_security_warnings.sql`
+
+**Tables with RLS enabled:**
+- `lactate_tests`
+- `weekly_monotony_strain`
+- `activity_zone_time`
+
+---
+
+**Feature 2: Manual Sync Button**
+
+Added a "Sync" button to the dashboard header that triggers the Lambda function for on-demand data refresh.
+
+**Architecture:**
+```
+Dashboard (Sync button)
+    ↓ HTTP POST with Bearer token
+Lambda Function URL
+    ↓ Validates token
+Lambda executes ingestion (3-day window)
+    ↓ Returns JSON result
+Dashboard shows status
+```
+
+**AWS Setup:**
+1. Created Lambda Function URL on `ins-dashboard-daily-ingestion`
+2. Added `REFRESH_TOKEN` environment variable to Lambda
+3. CORS enabled for cross-origin requests
+
+**Dashboard Changes:**
+- Sync button next to user name (blue, no border)
+- Status display showing progress/result
+- Async handler to not block UI during 10-min sync
+
+**Files Modified:**
+| File | Changes |
+|------|---------|
+| `lambda/lambda_function.py` | Added Function URL support with Bearer auth |
+| `supabase_shiny.py` | Added Sync button, status display, async handler |
+| `.env` | Added `LAMBDA_FUNCTION_URL` and `LAMBDA_REFRESH_TOKEN` |
+| `shiny_env.env` | Added same Lambda config for backup |
+
+**Environment Variables Added:**
+```
+LAMBDA_FUNCTION_URL=https://yr3tu22orzlav5jwoxly3c5rmu0fnxns.lambda-url.ca-central-1.on.aws/
+LAMBDA_REFRESH_TOKEN=<secret>
+```
+
+---
+
+**Feature 3: Rate Limiting (3 per day)**
+
+Implemented rate limiting to prevent abuse of the Sync button.
+
+**Implementation:**
+- New `sync_log` table tracks each sync attempt
+- `check_sync_allowed()` SQL function checks daily count
+- Dashboard checks limit before triggering Lambda
+- Shows "Limite atteinte (3/3 aujourd'hui)" when limit reached
+
+**Migration:** `migrations/create_sync_log.sql`
+
+**Database Table:**
+```sql
+CREATE TABLE sync_log (
+    id SERIAL PRIMARY KEY,
+    triggered_at TIMESTAMPTZ DEFAULT NOW(),
+    triggered_by TEXT,
+    status TEXT DEFAULT 'started',
+    message TEXT
+);
+```
+
+---
+
+**Feature 4: UI Styling Fixes**
+
+- Removed red border from Logout button
+- Removed blue border from Sync button
+- Consistent button styling (no borders, subtle hover effects)
+
+---
+
+### Previous Session (Jan 29, 2026) - FAST LOGIN + QUESTIONNAIRES VALIDATED
+
+**Session Summary:**
+1. Validated questionnaires are working correctly (tested with Kevin Robertson)
+2. Deleted test questionnaire data from database
+3. Updated lactate test form - Distance field now beside Lactate field
+4. Fixed slow login (7-10 seconds → <1 second)
+
+---
+
+**Feature 1: Questionnaire Validation**
+- Tested daily workout survey and weekly wellness survey
+- Both working correctly and saving to database
+- Deleted test data for Kevin Robertson (week Jan 26, activity May 2)
+
+**Feature 2: Lactate Form UI Update**
+- Moved Distance field to appear beside Lactate field for lactate tests
+- For races: Distance | Race Time side by side
+- For lactate tests: Lactate | Distance side by side
+
+**Feature 3: Fast Login Performance Fix**
+
+**Problem:** Login took 7-10 seconds because it looped through ALL 24 users running bcrypt verification on each (~186ms per user).
+
+**Solution:** Added SHA256 password prefix for O(1) database lookup.
+
+| Before | After |
+|--------|-------|
+| Fetch all 24 users | Query by prefix (instant) |
+| bcrypt verify each (186ms × 24) | bcrypt verify 1 user (186ms) |
+| **Total: 7-10 seconds** | **Total: <1 second** |
+
+**Implementation:**
+1. Added `password_prefix` column to `users` table (first 16 chars of SHA256 hash)
+2. Created index on `password_prefix` for fast lookup
+3. Updated all 24 users with their password prefixes
+4. Login now: generate prefix → query by prefix → verify single match
+
+**Files Modified:**
+| File | Changes |
+|------|---------|
+| `auth_utils.py` | Added `generate_password_prefix()` function |
+| `supabase_shiny.py` | Updated login handler to use prefix lookup |
+| `migrations/add_password_prefix.sql` | NEW - Database migration |
+
+**Database Changes:**
+```sql
+ALTER TABLE users ADD COLUMN password_prefix TEXT;
+CREATE INDEX idx_users_password_prefix ON users(password_prefix);
+```
+
+**Security Note:** The SHA256 prefix is NOT secure for password storage alone - it's only used for fast lookup. The actual password verification still uses bcrypt.
+
+---
+
+### Previous Session (Jan 20, 2026) - AWS LAMBDA CRON COMPLETE
+
+**AWS Lambda Daily Automation - LIVE AND RUNNING**
+
+Successfully deployed and tested AWS Lambda function for automated daily ingestion.
 
 **What Was Done:**
-- ✅ Created billing alert ($10 threshold)
-- ✅ Created 3 secrets in AWS Secrets Manager:
-  - `ins-dashboard/supabase` - Database credentials
-  - `ins-dashboard/athletes` - 18 athlete API keys
-  - `ins-dashboard/config` - Configuration settings
-- ✅ Created comprehensive AWS setup guide: `AWS_SETUP_GUIDE.md`
-- ✅ Created IAM Policy `INS-Dashboard-SecretsAccess`
-- ✅ Created IAM Role `INS-Dashboard-EC2-Role`
-- ✅ Launched EC2 instance `INS-Bulk-Import` (t3.small, Ubuntu 24.04)
+- ✅ Terminated EC2 bulk import instance (completed Jan 18)
+- ✅ Created IAM Role `INS-Dashboard-Lambda-Role` with Secrets Manager access
+- ✅ Created Lambda function `ins-dashboard-daily-ingestion` (Python 3.11)
+- ✅ Built deployment package with Linux-compatible pandas/numpy binaries
+- ✅ Configured Lambda: 15 min timeout, 512 MB memory
+- ✅ Created EventBridge schedule: daily at 6 AM Eastern (cron `0 6 * * ? *`)
+- ✅ Fixed multiple issues during testing (see Phase 3D in Archive)
+- ✅ Final test: **18/18 athletes successful**
 
-**AWS Resources Created:**
+**Lambda Configuration:**
+
+| Setting | Value |
+|---------|-------|
+| Function name | `ins-dashboard-daily-ingestion` |
+| Runtime | Python 3.11 |
+| Memory | 512 MB |
+| Timeout | 15 minutes |
+| Per-athlete timeout | 5 minutes (300s) |
+| Date range | Last 3 days (rolling window) |
+| Schedule | Daily 6 AM Eastern |
+
+**Files Created in `lambda/` Directory:**
+- `lambda_function.py` - Main Lambda handler
+- `aws_secrets_loader.py` - Loads credentials from Secrets Manager
+- `build_lambda.sh` - Build script for deployment package
+
+**Key Features:**
+- **3-day rolling window:** Always imports last 3 days for overlap safety
+- **Duplicate prevention:** Script checks existing activity IDs before import
+- **No missed workouts:** Even if Lambda fails one day, next run catches up
+- **Weather included:** Daily cron fetches weather (unlike bulk import)
+
+**AWS Resources (Final):**
 
 | Resource | Name | Region | Status |
 |----------|------|--------|--------|
-| Secret | `ins-dashboard/supabase` | ca-central-1 | ✅ Created |
-| Secret | `ins-dashboard/athletes` | ca-central-1 | ✅ Created |
-| Secret | `ins-dashboard/config` | ca-central-1 | ✅ Created |
-| IAM Policy | `INS-Dashboard-SecretsAccess` | Global | ✅ Created |
-| IAM Role | `INS-Dashboard-EC2-Role` | Global | ✅ Created |
-| EC2 Instance | `INS-Bulk-Import` | ca-central-1 | ✅ Launched |
+| Secret | `ins-dashboard/supabase` | ca-central-1 | ✅ Active |
+| Secret | `ins-dashboard/athletes` | ca-central-1 | ✅ Active |
+| IAM Role | `INS-Dashboard-Lambda-Role` | Global | ✅ Active |
+| Lambda | `ins-dashboard-daily-ingestion` | ca-central-1 | ✅ Running |
+| EventBridge | Daily 6 AM ET schedule | ca-central-1 | ✅ Active |
+| EC2 | `INS-Bulk-Import` | ca-central-1 | ❌ Terminated |
 
-**Next Steps (To Resume):**
-1. ⏳ Connect to EC2 via Session Manager
-2. ⏳ Install Python and dependencies
-3. ⏳ Upload/create ingestion scripts
-4. ⏳ Run bulk import for all 18 athletes
-5. ⏳ **IMPORTANT: Terminate EC2 after import** (avoid charges)
+---
 
-**Reference:** See `AWS_SETUP_GUIDE.md` for complete step-by-step instructions.
+### Previous Session (Jan 18, 2026)
+
+**AWS EC2 Bulk Import - COMPLETED**
+
+Successfully ran bulk import for all 18 athletes on EC2, then terminated instance.
+
+**Bulk Import Results:**
+- Date range: 2025-01-01 to 2026-01-18
+- Athletes: 18 processed
+- Weather: Skipped (--skip-weather)
+- Status: ✅ Complete
+
+**EC2 Instance:** Terminated after import to avoid ongoing charges.
 
 ---
 
@@ -597,10 +992,10 @@ Synchronized `complete_database_schema.sql` with the actual production database 
 - `migrations/create_lactate_tests.sql`
 - `migrations/insert_athlete_zones.sql`
 
-**Database Objects Verified (16 total):**
+**Database Objects Verified (18 total):**
 | Type | Objects |
 |------|---------|
-| Tables (14) | athlete, users, activity_metadata, activity, activity_intervals, wellness, personal_records, personal_records_history, athlete_training_zones, daily_workout_surveys, weekly_wellness_surveys, lactate_tests, activity_zone_time, weekly_monotony_strain |
+| Tables (16) | athlete, users, activity_metadata, activity, activity_intervals, wellness, personal_records, personal_records_history, athlete_training_zones, daily_workout_surveys, weekly_wellness_surveys, lactate_tests, activity_zone_time, weekly_monotony_strain, sync_log, workout_pain_entries |
 | Mat. Views (2) | activity_pace_zones, weekly_zone_time |
 
 ---
@@ -709,11 +1104,11 @@ Claude Code is connected to Marc's Notion workspace via MCP. This enables readin
 
 | Task | Status | Priority | Type |
 |------|--------|----------|------|
-| Set-up AWS pour ingestion | En cours | Moyenne | Critique |
-| Set-up cron dans AWS | Pas commencé | Moyenne | Critique |
+| Set-up AWS pour ingestion | ✅ Terminé | Moyenne | Critique |
+| Set-up cron dans AWS | ✅ Terminé | Moyenne | Critique |
 | Ajouter tableau de suivi des RPE | Pas commencé | Faible | Fonctionnalité |
 | Ajouter tableau suivi wellness | Pas commencé | Faible | Fonctionnalité |
-| Ajout de marqueur pour race | Pas commencé | Faible | Fonctionnalité |
+| Ajout de marqueur pour race | ✅ Terminé | Faible | Fonctionnalité |
 
 ### CRITICAL RULES
 
@@ -745,73 +1140,40 @@ Claude Code is connected to Marc's Notion workspace via MCP. This enables readin
 
 ## NOW - Immediate Priorities
 
-### 🔴 Priority 0: Data Import for New Athletes - PENDING
-
-**Goal:** Import activity data for all 18 athletes with Intervals.icu credentials
-**Status:** Users created, SQL migration done, awaiting dry run + import
-
-| Step | Command | Status |
-|------|---------|--------|
-| Dry run test | `python intervals_hybrid_to_supabase.py --oldest 2024-01-01 --newest 2025-01-14 --dry-run` | ⏳ Pending |
-| Full import | `python intervals_hybrid_to_supabase.py --oldest 2024-01-01 --newest 2025-01-14` | ⏳ Pending |
-| Redeploy dashboard | See deployment command in Quick Reference | ⏳ Pending |
-
----
-
-### 🟡 Priority 1: AWS Setup for Automation - IN PROGRESS
+### ✅ AWS Automation - COMPLETE
 
 **Goal:** Automated daily ingestion + one-time bulk historical import
-**Status:** Secrets Manager + IAM completed (Jan 16, 2026), EC2 pending
+**Status:** ✅ FULLY OPERATIONAL (Jan 20, 2026)
 **Region:** `ca-central-1` (Canada Central)
-**Guide:** See `AWS_SETUP_GUIDE.md` for detailed instructions
 
 | Task | Service | Status |
 |------|---------|--------|
 | Set up billing alert ($10) | AWS Console | ✅ Done |
-| Store credentials | Secrets Manager | ✅ Done (3 secrets) |
-| Create IAM policy | IAM | ✅ Done (`INS-Dashboard-SecretsAccess`) |
-| Create IAM role for EC2 | IAM | ✅ Done (`INS-Dashboard-EC2-Role`) |
-| Launch EC2 for bulk import | EC2 | ✅ Done (`INS-Bulk-Import`) |
-| Configure EC2 environment | EC2 | ⏳ Pending |
-| Run bulk import (2024-2026) | EC2 | ⏳ Pending |
-| **Terminate EC2** | EC2 | ⏳ After import |
-| Create IAM role for Lambda | IAM | ⏳ Pending (after bulk import) |
-| Deploy Lambda function | Lambda | ⏳ Pending |
-| Configure daily cron (6 AM ET) | EventBridge | ⏳ Pending |
+| Store credentials | Secrets Manager | ✅ Done (2 secrets) |
+| Bulk import historical data | EC2 | ✅ Complete (terminated) |
+| Create IAM role for Lambda | IAM | ✅ Done (`INS-Dashboard-Lambda-Role`) |
+| Deploy Lambda function | Lambda | ✅ Done (`ins-dashboard-daily-ingestion`) |
+| Configure daily cron (6 AM ET) | EventBridge | ✅ Done |
+| Test end-to-end | Lambda Test | ✅ 18/18 athletes success |
 
-**Secrets Created (Jan 16, 2026):**
-
-| Secret Name | Contents | Created |
-|-------------|----------|---------|
-| `ins-dashboard/supabase` | Supabase URL + Service Role Key | ✅ 00:14 UTC |
-| `ins-dashboard/athletes` | 18 athletes with API keys | ✅ 00:19 UTC |
-| `ins-dashboard/config` | Timeouts, timezone, URLs | ✅ 00:20 UTC |
-
-**AWS Services & Estimated Costs:**
+**AWS Services & Actual Costs:**
 
 | Service | Purpose | Cost |
 |---------|---------|------|
-| Secrets Manager | Store credentials (3 secrets) | ~$1.20/month |
-| Lambda | Daily ingestion (5 min/day) | ~$2-5/month |
+| Secrets Manager | Store credentials (2 secrets) | ~$0.80/month |
+| Lambda | Daily ingestion (~10 min/day) | ~$2-5/month |
 | EventBridge | Cron trigger | Free |
-| EC2 | Bulk import (one-time, 2-4 hrs) | ~$0.05 total |
 | CloudWatch | Logs & monitoring | ~$1-2/month |
 
-**Total: ~$5-10/month ongoing**
+**Total: ~$4-8/month ongoing**
 
-### 🟡 Priority 2: Run Remaining Migrations
+### 🟡 Next Priorities
 
-| Migration | Purpose | Status |
-|-----------|---------|--------|
-| `create_personal_records_table.sql` | All-time best performances | ⏳ Pending |
-| `create_athlete_training_zones.sql` | Versioned training zones | ⏳ Pending |
-
-### 🟢 Priority 3: Git Commit ✅ DONE
-
-All changes committed and pushed to GitHub:
-- GitHub repository cleaned (20+ files removed from tracking)
-- Wellness integration merged into main ingestion script
-- Documentation updated
+| Priority | Task | Status |
+|----------|------|--------|
+| 1 | Monitor Lambda for 7 days | ⏳ In progress |
+| 2 | Run remaining migrations if needed | ⏳ Pending |
+| 3 | Git commit Lambda files | ⏳ Pending |
 
 ---
 
@@ -880,25 +1242,26 @@ All changes committed and pushed to GitHub:
 
 ## 📊 DATABASE SCHEMA
 
-**Total: 14 Tables + 2 Materialized Views**
+**Total: 16 Tables + 2 Materialized Views**
 
 ### Core Tables (6)
 
 | Table | Purpose | Key Fields |
 |-------|---------|------------|
 | `athlete` | Profiles | athlete_id, name, intervals_icu_id |
-| `users` | Authentication | id, name, password_hash, role, athlete_id |
+| `users` | Authentication | id, name, password_hash, password_prefix, role, athlete_id |
 | `activity_metadata` | Activity summaries | activity_id, date, distance_m, duration_sec, avg_hr, weather_* |
 | `activity` | GPS timeseries | activity_id, lat, lng, heartrate, cadence, watts |
 | `activity_intervals` | Workout segments | activity_id, type, distance, moving_time, average_heartrate |
 | `wellness` | Daily wellness | athlete_id, date, hrv, sleep_quality, soreness |
 
-### Survey Tables (2)
+### Survey Tables (3)
 
 | Table | Purpose |
 |-------|---------|
-| `daily_workout_surveys` | Post-workout RPE, satisfaction, goals |
+| `daily_workout_surveys` | Post-workout RPE, satisfaction, goals, capacite_execution (0-3) |
 | `weekly_wellness_surveys` | BRUMS, REST-Q, OSLO metrics |
+| `workout_pain_entries` | Structured pain data from body picker (one row per body part per survey) |
 
 ### Configuration Tables (3)
 
@@ -914,7 +1277,7 @@ All changes committed and pushed to GitHub:
 |-------|---------|
 | `activity_zone_time` | Zone time per activity (incremental calculation) |
 | `weekly_monotony_strain` | Carl Foster monotony/strain per week |
-| `lactate_tests` | Manual lactate test results |
+| `lactate_tests` | Events: lactate tests, races, injuries, and speed tests |
 
 ### Materialized Views (2)
 
@@ -922,6 +1285,12 @@ All changes committed and pushed to GitHub:
 |------|---------|
 | `activity_pace_zones` | Pace zone distribution per activity |
 | `weekly_zone_time` | Zone time aggregated by week |
+
+### Operational Tables (1)
+
+| Table | Purpose |
+|-------|---------|
+| `sync_log` | Rate limiting for manual sync (3/day limit) |
 
 ---
 
@@ -1020,33 +1389,15 @@ ON-DEMAND (Refresh Button):
 #### Secret 1: `ins-dashboard/supabase` (JSON)
 ```json
 {
-  "SUPABASE_URL": "https://vqcqqfddgnvhcrxcaxjf.supabase.co",
-  "SUPABASE_SERVICE_ROLE_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZxY3FxZmRkZ252aGNyeGNheGpmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MjEwMDUyNCwiZXhwIjoyMDc3Njc2NTI0fQ.JM7kDSnDIPdBqZN0DrW-BEA7VaavS3_Kp_dT9Q-Mtmo"
+  "SUPABASE_URL": "<STORED IN AWS SECRETS MANAGER>",
+  "SUPABASE_SERVICE_ROLE_KEY": "<STORED IN AWS SECRETS MANAGER>"
 }
 ```
 
 #### Secret 2: `ins-dashboard/athletes` (JSON)
-```json
-[
-  {"id": "i344978", "name": "Matthew Beaudet", "api_key": "3o9i1mgt6e7yfzoktkc0fmrj2"},
-  {"id": "i344979", "name": "Kevin Robertson", "api_key": "2s39s4kmmhnw02y32qp4lgw4q"},
-  {"id": "i344980", "name": "Kevin A. Robertson", "api_key": "7jwc28oik78tdjixjl94l8wee"},
-  {"id": "i95073", "name": "Sophie Courville", "api_key": "99atczyc8ajd1z510hdlh0aw"},
-  {"id": "i347434", "name": "Zakary Mama-Yari", "api_key": "70rmcmsk297dkkgnevn7wwupc"},
-  {"id": "i453408", "name": "Alex Larochelle", "api_key": "jkdw4ivm6wvudmiwoh7olzyd"},
-  {"id": "i454587", "name": "Alexandrine Coursol", "api_key": "2o0xpawaj99soor5blv66lxbf"},
-  {"id": "i453651", "name": "Doan Tran", "api_key": "75db3mdf3xo7wjco981r71frn"},
-  {"id": "jadeessabar", "name": "Jade Essabar", "api_key": "1cy45wy7nldmza14wzsr25oie"},
-  {"id": "i453625", "name": "Marc-Andre Trudeau Perron", "api_key": "1zuh81vaeu1hc9th63gteatsj"},
-  {"id": "i197667", "name": "Marine Garnier", "api_key": "yi34bczjcunrzlb8divoampg"},
-  {"id": "i453790", "name": "Myriam Poirier", "api_key": "1p9yhcxs6cx8oh0c7t0xrlxbw"},
-  {"id": "i453396", "name": "Nazim Berrichi", "api_key": "4qxdul0cod6xpzg7qoi086tmx"},
-  {"id": "i453411", "name": "Robin Lefebvre", "api_key": "3b906pd2t8lwsk215dbp7lw6v"},
-  {"id": "i453944", "name": "Yassine Aber", "api_key": "5yhz82b6a4unz7afweqfmmd08"},
-  {"id": "i454589", "name": "Evans Stephen", "api_key": "11ayv0bp65zwf7whezd9m83sh"},
-  {"id": "i248571", "name": "Ilyass Kasmi", "api_key": "4bcyuvuzdu2yctsl9dwxx38mi"},
-  {"id": "i172048", "name": "Emma Veilleux", "api_key": "4bcyuvuzdu2yctsl9dwxx38mi"}
-]
+```
+18 athletes with Intervals.icu API keys — stored in AWS Secrets Manager.
+Local copy: athletes.json.local (gitignored)
 ```
 
 #### Secret 3: `ins-dashboard/config` (JSON) - Optional
@@ -1080,7 +1431,7 @@ ON-DEMAND (Refresh Button):
 aws secretsmanager create-secret \
   --name "ins-dashboard/supabase" \
   --description "Supabase credentials for INS Dashboard" \
-  --secret-string '{"SUPABASE_URL":"https://vqcqqfddgnvhcrxcaxjf.supabase.co","SUPABASE_SERVICE_ROLE_KEY":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."}'
+  --secret-string '{"SUPABASE_URL":"<YOUR_URL>","SUPABASE_SERVICE_ROLE_KEY":"<YOUR_KEY>"}'
 
 # Create Athletes secret (from file)
 aws secretsmanager create-secret \
@@ -1700,6 +2051,213 @@ When athletes link Strava instead of watch, Strava strips Stryd biomechanics dat
 - **Migration Required:** `migrations/add_lactate_test_type.sql`
 - **Deployed:** Live on production (commit `699c370`)
 
+### Phase 3C: ShinyWidgets Crash Fix (Jan 18, 2026) ✅
+- **Problem:** Dashboard crashed ~2 seconds after login on ShinyApps.io (worked locally)
+- **Root Cause:** `shinywidgets` library incompatible with ShinyApps.io Python environment
+- **Solution:** Convert all Plotly graphs from shinywidgets to HTML rendering
+- **Code Changes (supabase_shiny.py):**
+  - Commented out: `from shinywidgets import output_widget, render_plotly`
+  - Added `plotly_to_html()` helper function (uses `fig.to_html()` with inline JS)
+  - Changed 7 graph functions from `@render_plotly` to `@output` + `@render.ui`
+  - Changed all `output_widget("name")` to `ui.output_ui("name")`
+  - All `return fig` statements now `return plotly_to_html(fig)`
+- **Graphs Converted:**
+  - `run_duration_trend()` - CTL/ATL/TSB trend
+  - `pie_types()` - Activity type distribution
+  - `pace_hr_scatter()` - Pace vs HR scatter
+  - `weekly_volume()` - Weekly volume bars
+  - `zone_time_longitudinal()` - Zone time over time
+  - `plot_xy()` - Single activity XY graph
+  - `comparison_plot()` - Activity comparison
+- **Technical Note:** First graph uses `include_plotlyjs=True` (inline JS), subsequent use CDN to avoid duplicate JS loading
+- **Deployed:** Live on production
+
+### Phase 3D: AWS Lambda Daily Automation (Jan 20, 2026) ✅
+- **Goal:** Automated daily ingestion of athlete data without manual intervention
+- **Architecture:**
+  - EventBridge Scheduler triggers Lambda at 6 AM Eastern daily
+  - Lambda loads credentials from Secrets Manager
+  - Processes 18 athletes sequentially with 5-min timeout each
+  - Uses 3-day rolling window for overlap safety
+  - Duplicate prevention via `get_existing_activity_ids()`
+- **Files Created:**
+  - `lambda/lambda_function.py` - Main Lambda handler
+  - `lambda/aws_secrets_loader.py` - Secrets Manager integration
+  - `lambda/build_lambda.sh` - Build script for deployment package
+- **Code Changes (intervals_hybrid_to_supabase.py):**
+  - Line 806: Added `ATHLETES_JSON_PATH` env var support for Lambda
+  - Line 2218: Fixed exit code logic (return 0 when no new activities, not 1)
+- **Issues Solved During Setup:**
+  1. **pandas not found:** Lambda Layers not accessible by subprocess → included in deployment package
+  2. **numpy C-extensions failed:** macOS binaries uploaded → used `--platform manylinux2014_x86_64`
+  3. **fitparse no Linux wheel:** Pure Python packages → split pip install commands
+  4. **Timeouts:** 2-min Lambda timeout too short → increased to 15 min
+  5. **False failures:** Script returned 1 when no new activities → fixed exit code logic
+- **Lambda Configuration:**
+  - Function: `ins-dashboard-daily-ingestion`
+  - Runtime: Python 3.11
+  - Memory: 512 MB
+  - Timeout: 15 minutes
+  - Schedule: `cron(0 6 * * ? *)` with America/Toronto timezone
+- **Build Command (for updates):**
+  ```bash
+  cd lambda/
+  ./build_lambda.sh
+  # Then upload lambda_deployment.zip to AWS Lambda console
+  ```
+- **Result:** 18/18 athletes processing successfully
+
+### Phase 3E: Fast Login + Questionnaire Validation (Jan 29, 2026) ✅
+- **Questionnaire Validation:**
+  - Tested daily workout and weekly wellness surveys - both working
+  - Deleted test data for Kevin Robertson
+- **Lactate Form UI Update:**
+  - Distance field now beside Lactate field for lactate tests
+  - Distance | Race Time side by side for races
+- **Fast Login Performance Fix:**
+  - **Problem:** Login took 7-10 seconds (bcrypt loop through all 24 users)
+  - **Solution:** SHA256 password prefix for O(1) lookup
+  - **Result:** Login now <1 second
+- **Implementation:**
+  - Added `password_prefix` column to `users` table
+  - Added `generate_password_prefix()` to `auth_utils.py`
+  - Login: generate prefix → query by prefix → bcrypt verify 1 user
+- **Database Migration:** `migrations/add_password_prefix.sql`
+- **Files Modified:**
+  - `auth_utils.py`: Added `generate_password_prefix()` function
+  - `supabase_shiny.py`: Updated login handler, lactate form UI
+- **Deployed:** Live on production
+
+### Phase 3F: Sync Button + Security Fixes (Jan 30, 2026) ✅
+- **Supabase Security Fixes:**
+  - Enabled RLS on 3 tables: `lactate_tests`, `weekly_monotony_strain`, `activity_zone_time`
+  - Fixed mutable `search_path` on 10 functions
+  - Revoked anon/authenticated access from materialized views
+  - Created service-role specific policies
+- **Migrations Created:**
+  - `migrations/enable_rls_missing_tables.sql`
+  - `migrations/fix_security_warnings.sql`
+- **Manual Sync Button:**
+  - Added "Sync" button to dashboard header (next to Logout)
+  - Triggers Lambda Function URL for on-demand data refresh
+  - Syncs ALL 18 athletes (3-day rolling window)
+  - Available to everyone (athletes + coach)
+  - Shows progress/result status
+- **Lambda Updates:**
+  - Added Function URL support with Bearer token authentication
+  - Added CORS headers for cross-origin requests
+  - Still works with EventBridge scheduled trigger
+- **Rate Limiting:**
+  - Created `sync_log` table to track sync attempts
+  - `check_sync_allowed()` SQL function limits to 3 per day
+  - Dashboard checks limit before triggering Lambda
+- **Migration:** `migrations/create_sync_log.sql`
+- **Files Modified:**
+  - `lambda/lambda_function.py`: Function URL + Bearer auth
+  - `supabase_shiny.py`: Sync button, status display, rate limiting
+  - `.env`, `shiny_env.env`: Added Lambda credentials
+- **UI Styling:** Removed borders from Logout and Sync buttons
+- **Documentation:** Created `AWS_REFRESH_SETUP.md` with setup guide
+- **Deployed:** Live on production
+
+### Phase 3G: Events Card + Injury Tracking (Feb 2, 2026) ✅
+- **Tab Restructure:**
+  - Reordered cards: Events (TOP) → Training Zones → Personal Records (BOTTOM)
+  - Renamed "Tests et courses" to "Événements"
+  - Removed role restrictions (all users see all cards)
+- **Interactive SVG Body Picker:**
+  - 22 clickable body zones (runner-focused)
+  - 3 intensity levels: Green (légère), Yellow (modérée), Red (sévère)
+  - Status tracking: active, recovering, resolved
+  - JavaScript/CSS for hover/click interactions
+- **Database Migration:**
+  - Extended `test_type` CHECK to include 'injury'
+  - Added columns: `injury_location`, `injury_severity`, `injury_status`
+  - Made `distance_m` nullable (not needed for injuries)
+  - Added CHECK constraints for data integrity
+- **Migration:** `migrations/extend_lactate_tests_for_injuries.sql`
+- **Files Modified:**
+  - `supabase_shiny.py`: SVG body picker, injury UI, card reorder, handler updates
+- **Code Location:**
+  - SVG body picker: `lactate_conditional_fields()` function (~line 8915)
+  - Card reorder: `manual_entry_content()` function (~line 8210)
+  - Injury handler: `handle_save_lactate_test()` function (~line 8977)
+- **Deployed:** Live on production
+
+### Phase 3I: Metric Rounding (Feb 12, 2026) ✅
+- **Hover Tooltip Rounding:**
+  - CTL → `.1f` (was raw float with 10+ decimals)
+  - ATL → `.1f`
+  - TSB → `.1f`
+  - Vertical Oscillation → `.1f` in XY graph + comparison hovers
+  - LSS → `.2f` in XY graph + comparison hovers
+- **Design Decision:** Frontend-only rounding
+  - CTL/ATL/TSB are EWM-calculated in dashboard — no DB storage
+  - VO/LSS are raw sensor data — full precision preserved in DB for future analytics
+- **Implementation:**
+  - Added `hovertemplate` with `%{y:.1f}` to CTL/ATL/TSB `go.Scatter()` traces in `run_duration_trend()`
+  - Created `_hover_format` dict in `plot_xy()` for variable-specific formatting
+  - Created `_fmt_hover_vals()` helper in `comparison_plot()` for consistent formatting
+  - Covers both primary and secondary Y-axis traces
+- **Files Modified:** `supabase_shiny.py` only
+- **Deployed:** Live on production (commit `90dd2cf`), pushed to GitHub
+
+### Phase 3H: Multi-Feature Session (Feb 8, 2026) ✅
+- **Zone Error Fix:**
+  - Root cause: `reindex(fill_value=0)` on DataFrame with string columns
+  - Fix: Drop non-numeric columns before reindexing
+  - File: `supabase_shiny.py` line ~4500
+- **Per-Athlete Sync Button:**
+  - Athletes sync only their own data, coaches sync all
+  - Dashboard sends `{"athlete_name": "Name"}` for athletes, `{}` for coaches
+  - Lambda parses optional filter, falls back to all athletes if absent
+  - Backward compatible with EventBridge daily cron
+  - Files: `supabase_shiny.py` (handle_refresh_data), `lambda/lambda_function.py`
+  - Lambda redeployed and tested: 1/1 single athlete (5.5s) and 18/18 all (83s)
+- **Maximal Speed Test Event:**
+  - New `speed_test` type in Events card (3 types now: Lactate, Course, Vitesse max)
+  - Added `speed_ms` DECIMAL(6,3) column to `lactate_tests`
+  - Auto-calculates m/s from distance and time
+  - Time input supports MM:SS:MS format (milliseconds)
+  - Reuses `parse_time_to_seconds()` with fallback for raw seconds
+  - Migration: `migrations/add_speed_test_event.sql`
+- **Body Picker in Daily Questionnaire:**
+  - Dual SVG body picker (front + back) with multi-select
+  - Per-body-part severity (1-3) with color coding
+  - JS moved from `ui.HTML()` `<script>` to `ui.tags.script()` (fixes non-execution bug)
+  - Event delegation on `document` for reliable click handling
+  - Composite keys `view:partId` for independent front/back selections
+  - New `workout_pain_entries` table (one row per selected body part per survey)
+  - New `capacite_execution` column (0-3 scale) on `daily_workout_surveys`
+  - Removed `douleur_intensite` slider (redundant with per-part severity)
+  - Submission handler: `return=representation` → gets UUID → batch inserts pain entries
+  - Migration: `migrations/create_workout_pain_entries.sql`
+- **Pace/HR Dots Toggle:**
+  - Added "Afficher les points" checkbox to "Allure vs Fréquence cardiaque" card
+  - Scatter dots conditionally rendered; trend lines always visible
+  - When dots hidden, legend shows on trend lines instead
+- **Removed Injury from Events Card:**
+  - "Douleur/Blessure" type removed from Events card radio buttons
+  - SVG body picker, location dropdown, severity/status selectors removed (~180 lines)
+  - Pain tracking now exclusively in daily questionnaire body picker
+  - Existing injury records still display in results table (backward compatible)
+- **LSS Investigation:**
+  - Intervals.icu API strips Stryd developer fields from FIT exports
+  - Only 2 athletes have LSS data (from direct watch sync)
+  - No code fix possible - API limitation
+  - File investigated: `intervals_hybrid_to_supabase.py` line 1162
+- **Prevention Staff Login:** Added to to-do for future implementation
+- **Deployment Notes:**
+  - Added `--exclude "lambda"` to deploy command (lambda/package/ has spaces in folder names)
+  - Added `import json` at top of `supabase_shiny.py` (was only imported locally before)
+- **Files Modified:**
+  - `supabase_shiny.py`: Zone fix, sync update, speed test, body picker (JS fix + composite keys + removed slider), dots toggle, removed injury from Events, json import
+  - `lambda/lambda_function.py`: Per-athlete filter
+  - `complete_database_schema.sql`: New table + columns documented
+  - `migrations/add_speed_test_event.sql` (NEW)
+  - `migrations/create_workout_pain_entries.sql` (NEW)
+- **Deployed:** Dashboard + Lambda both live (3 deployments total)
+
 ---
 
 ## 📝 QUICK REFERENCE
@@ -1772,7 +2330,8 @@ SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem rsc
   --exclude "intervals_*" \
   --exclude ".mcp.json" \
   --exclude ".DS_Store" \
-  --exclude "manifest.json"
+  --exclude "manifest.json" \
+  --exclude "lambda"
 ```
 
 **Deployment Checklist:**
@@ -1781,6 +2340,7 @@ SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem rsc
 - [ ] `requirements.txt` should have NO version constraints (just package names)
 - [ ] Use `--app-id 16149191` to update existing app (NOT create new one)
 - [ ] Exclude all unnecessary files (see command above)
+- [ ] **NEVER use shinywidgets** - causes crashes on ShinyApps.io (use `plotly_to_html()` instead)
 
 **Files that MUST be deployed:**
 - `app.py` (wrapper/entrypoint)
@@ -1798,6 +2358,12 @@ SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem rsc
 3. Check if too many files in bundle → ADD MORE EXCLUDES
 4. Test with minimal "Hello World" app first
 
+**Troubleshooting "Disconnected from server" after login:**
+- If app crashes ~2 seconds after login with Plotly graphs
+- ROOT CAUSE: `shinywidgets` library incompatible with ShinyApps.io
+- SOLUTION: Use `plotly_to_html()` helper instead of `@render_plotly` / `output_widget()`
+- See Phase 3C in Archive for full details
+
 ### ShinyApps.io Registry
 
 | App Name | App ID | Status |
@@ -1808,7 +2374,7 @@ SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem rsc
 ### Supabase Database
 - **Project:** vqcqqfddgnvhcrxcaxjf
 - **Region:** Default
-- **Tables:** 14 (athlete, users, activity_metadata, activity, activity_intervals, wellness, daily_workout_surveys, weekly_wellness_surveys, personal_records, athlete_training_zones, activity_zone_time, weekly_zone_time, lactate_tests, weekly_monotony_strain)
+- **Tables:** 16 (athlete, users, activity_metadata, activity, activity_intervals, wellness, daily_workout_surveys, weekly_wellness_surveys, personal_records, personal_records_history, athlete_training_zones, activity_zone_time, weekly_zone_time, lactate_tests, weekly_monotony_strain, sync_log, workout_pain_entries)
 
 ### GitHub Repository
 - **URL:** https://github.com/MarcPaquet/INS_Dashboard
@@ -1831,11 +2397,29 @@ SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem rsc
 
 ## 📅 KNOWN ISSUES & NEXT PRIORITIES
 
-### ✅ Recently Fixed
+### ✅ Recently Fixed (Feb 2026)
 
 | Feature | Issue | Status |
 |---------|-------|--------|
-| **Daily Questionnaire** | Cannot select training from dropdown | ✅ Fixed (Dec 23, 2025) |
+| **Body Picker Not Clickable** | SVG parts visible but click handlers not attached | ✅ Fixed (Feb 8, 2026) - Phase 3H |
+| **Front/Back Cross-Selection** | Clicking front knee also selected back knee | ✅ Fixed (Feb 8, 2026) - Phase 3H |
+| **Pace/HR Graph Noise** | Too many dots on old data, no way to hide them | ✅ Fixed (Feb 8, 2026) - Phase 3H |
+| **Zone Error** | "Invalid value '0' for dtype 'str'" on zone graph | ✅ Fixed (Feb 8, 2026) - Phase 3H |
+| **Per-Athlete Sync** | All syncs triggered full team sync | ✅ Fixed (Feb 8, 2026) - Phase 3H |
+| **Speed Test Event** | No way to record sprint times (now with ms support) | ✅ Added (Feb 8, 2026) - Phase 3H |
+| **Body Picker** | Pain location was text-only input | ✅ Added (Feb 8, 2026) - Phase 3H |
+| **Events Card** | No injury tracking | ✅ Added (Feb 2, 2026) - Phase 3G → Moved to questionnaire only |
+
+### ✅ Recently Fixed (Jan 2026)
+
+| Feature | Issue | Status |
+|---------|-------|--------|
+| **Supabase Security** | RLS disabled, mutable search_path | ✅ Fixed (Jan 30, 2026) - Phase 3F |
+| **Manual Sync Button** | No on-demand refresh | ✅ Added (Jan 30, 2026) - Phase 3F |
+| **Slow Login** | 7-10 second login time | ✅ Fixed (Jan 29, 2026) - SHA256 prefix lookup |
+| **AWS Lambda Cron** | Daily automation not running | ✅ Fixed (Jan 20, 2026) |
+| **ShinyWidgets Crash** | Dashboard crash on production | ✅ Fixed (Jan 18, 2026) |
+| **Bulk Import** | Historical data missing | ✅ Complete (Jan 18, 2026) |
 
 ### ✅ Recently Fixed (Dec 2025)
 
@@ -1847,14 +2431,20 @@ SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem rsc
 | Zone Graph Display | 2N | Plotly responsiveness + timestamp conversion |
 | Coach Selector | 2Q | Added reactive event decorator |
 
+### 🔴 Known Limitations
+
+| Issue | Details |
+|-------|---------|
+| **LSS (Leg Spring Stiffness)** | Intervals.icu API strips Stryd developer fields from FIT exports. Only 2 athletes have LSS data (from direct watch sync). No code fix possible - API limitation. |
+
 ### 🟡 Next Priorities
 
-1. **Fix Daily Questionnaire** - Training selector dropdown issue
-2. **AWS Infrastructure** - Lambda, EventBridge, EC2 for automation
-3. **Bulk Import** - Execute historical import on AWS EC2
+1. **Prevention staff login** - New role for physio/prevention staff with restricted access
+2. **Git commit all changes** - Push lambda/ directory + session changes to GitHub
+3. **Dashboard enhancements** - RPE tracking table, wellness tracking table
 
 ---
 
 **END OF DOCUMENT**
 
-*Last Updated: January 3, 2026*
+*Last Updated: February 12, 2026*

@@ -802,7 +802,9 @@ def get_existing_activity_ids(athlete_id: str) -> set:
 def load_athletes(athlete_filter: Optional[str] = None) -> List[Dict]:
     """Charger les athlètes"""
     try:
-        with open("athletes.json.local", "r") as f:
+        # Support custom path via env var (for Lambda /tmp/)
+        athletes_path = os.environ.get("ATHLETES_JSON_PATH", "athletes.json.local")
+        with open(athletes_path, "r") as f:
             athletes = json.load(f)
         
         if athlete_filter:
@@ -2213,7 +2215,9 @@ def main():
         except Exception as e:
             print(f"{Colors.YELLOW} Could not refresh zone views: {e}{Colors.END}\n")
 
-    return 0 if stats['activities_processed'] > 0 else 1
+    # Return 0 (success) even when no new activities - that's expected for daily cron
+    # Only return 1 if there were actual failures
+    return 0 if stats.get('batch_failures', 0) == 0 else 1
 
 if __name__ == "__main__":
     sys.exit(main())
