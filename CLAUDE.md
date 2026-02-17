@@ -2,7 +2,7 @@
 
 **Project:** Intervals.icu → Supabase Data Ingestion System
 **Team:** Saint-Laurent Sélect Running Club
-**Last Updated:** February 12, 2026 (METRIC ROUNDING)
+**Last Updated:** February 16, 2026 (QUESTIONNAIRE UX + SMART ROUNDING + OSTRC)
 **Status:** ✅ **FULLY AUTOMATED** - Dashboard + Daily Lambda Cron Running
 
 ---
@@ -286,7 +286,157 @@ All previous troubleshooting around database issues was a red herring - the root
 
 ---
 
-### Current Session (Feb 12, 2026) - METRIC ROUNDING
+### Current Session (Feb 16, 2026) - QUESTIONNAIRE UX + SMART ROUNDING + OSTRC
+
+**Session Summary:**
+1. Weekly questionnaire full width (removed `max-width: 1200px`)
+2. BRUMS/REST-Q responsive layout (3 cols desktop, 2 cols mobile)
+3. New sRPE card below questionnaire pills (RPE x Duration graph with ACL/ATL)
+4. Smart rounding (`smart_format`/`smart_round`) applied dashboard-wide
+5. ATL/CTL ratio (%) shown in CTL/ATL/TSB hover tooltip
+6. French month names on Pace vs HR trend line hovers
+7. OSTRC-H2 questionnaire replacing simple severity dropdowns in body picker
+8. Database migration for OSTRC columns on `workout_pain_entries`
+
+---
+
+**Feature 1: Weekly Questionnaire Full Width**
+
+Removed `max-width: 1200px` from weekly questionnaire container so it stretches to fill available width like the daily questionnaire.
+
+**Change:** Line ~3093 — removed `max-width: 1200px;` from style string.
+
+---
+
+**Feature 2: Responsive BRUMS/REST-Q Layout**
+
+**Problem:** Global CSS rule at line ~2113 forces `.bslib-grid .col-4` to `span 12` (full width) at ≤992px, making BRUMS/REST-Q questions go 1-per-row too aggressively on tablet.
+
+**Solution:**
+- Added `.responsive-3col` CSS class with media query overrides:
+  - `>992px`: 3 columns (default Bootstrap behavior)
+  - `768-992px`: 3 columns (override global rule)
+  - `<768px`: 2 columns (mobile-friendly)
+- Applied `{"class": "responsive-3col"}` to BRUMS and REST-Q `ui.div()` wrappers
+
+---
+
+**Feature 3: sRPE (Subjective Charge) Card**
+
+New card below the daily/weekly questionnaire pills showing subjective training load over time.
+
+**Formula:** sRPE = RPE (CR10, 0-10) × Duration (minutes) — Foster's session RPE method
+
+**Data source:** `daily_workout_surveys` table — columns `rpe_cr10`, `duree_min` — covers ALL activity types (running, cross-training, weight lifting)
+
+**Graph:**
+- Red semi-transparent bars: Individual session sRPE values (non-zero days only)
+- Red solid line: 7-day EWM (ACL — acute load)
+- Navy solid line: 28-day EWM (ATL — chronic load)
+- Groups by day with `.sum()` for multiple sessions per day
+- Fills date gaps with 0 (rest days count toward moving average)
+- Empty state: "Aucune donnee sRPE disponible" when no survey data exists
+
+**Server function:** `srpe_graph()` — uses `get_effective_athlete_id()`, `supa_select()`, `plotly_to_html()`
+
+---
+
+**Feature 4: Smart Rounding (Dashboard-Wide)**
+
+**Utility functions added after imports:**
+- `smart_round(value)`: Returns rounded value (1 decimal if `|value| < 20`, else 0 decimals)
+- `smart_format(value)`: Returns formatted string with same logic
+
+**Exceptions:**
+- Pace: Always `MM:SS` format (unchanged)
+- LSS: Always `.2f` (2 decimals — low-magnitude sensor data)
+- ATL/CTL Ratio: Always `.1f%` (percentage)
+
+**Applied to:**
+| Graph | Traces |
+|-------|--------|
+| `run_duration_trend()` | CTL, ATL, TSB via `customdata` + `smart_format` |
+| `weekly_volume()` | Volume bars via `customdata` + `smart_format` + " km" |
+| `zone_time_longitudinal()` | Zone bars, distinct lines, ACL/ATL overlay, monotony, strain |
+| `plot_xy()` | All variables except LSS (`.2f`) — via `_hover_fixed_format` dict |
+| `comparison_plot()` | All variables except LSS — via `_comp_fixed_format` dict + `_fmt_hover_vals()` |
+
+**Implementation pattern:** Pre-format values into `customdata` lists using `smart_format()`, reference via `%{customdata}` or `%{customdata[0]}` in `hovertemplate`.
+
+---
+
+**Feature 5: ATL/CTL Ratio in Hover**
+
+ATL/CTL ratio (%) now always appears in the CTL/ATL/TSB graph hover tooltip — no checkbox needed.
+
+**Formula:** `ratio = (ATL / CTL) × 100`
+
+**Implementation:** Ratio computed and embedded into TSB trace's `customdata` as second element. TSB hovertemplate shows both TSB value and ratio:
+```
+TSB (min)
+24 Jun 2025
+7.6
+Ratio ATL/CTL: 86.5%
+```
+
+---
+
+**Feature 6: French Month Names on Pace vs HR Hover**
+
+**Problem:** Trend lines on "Allure vs Fréquence cardiaque" had `hoverinfo='skip'` — hovering showed nothing. Months displayed as raw `YYYY-MM` in legend.
+
+**Solution:**
+- Added `_FR_MONTHS` dict and `_month_label()` helper converting `"2025-01"` → `"Janvier 2025"`
+- Trend lines now show: `<b>Janvier 2025</b><br>Allure: 4:15<br>FC: 152 bpm`
+- Scatter dots and legend entries also show French month names
+
+---
+
+**Feature 7: OSTRC-H2 Questionnaire (Body Picker)**
+
+Replaced simple severity dropdown (1-Légère, 2-Modérée, 3-Sévère) with standardized Oslo Sports Trauma Research Centre (OSTRC-H2) questionnaire per body part.
+
+**4 OSTRC Questions per selected body part:**
+- Q1 Participation (0-3): Full participation → Cannot participate
+- Q2 Training Volume (0-4): No reduction → Cannot train
+- Q3 Performance (0-4): No impact → Cannot perform
+- Q4 Pain/Symptoms (0-3): No pain → Severe pain
+
+**OSTRC Score:** `((Q1/3 + Q2/4 + Q3/4 + Q4/3) / 4) × 100` → 0% (no problem) to 100% (max severity)
+
+**UI Changes (JavaScript):**
+- Each selected body part now shows 4 dropdown questions instead of 1 severity dropdown
+- Live OSTRC score displayed in part header (e.g., "Genou G (av.) — Score: 42%")
+- SVG body part colors based on score: green (≤25%), yellow (≤50%), red (>50%)
+- Selection data structure: `{view, q1, q2, q3, q4}` instead of `{view, severity}`
+- `calcOstrcScore()` and `ostrcClass()` JS functions for live score + color
+- `_dailyBPSetQ(key, qName, val)` replaces `_dailyBPSetSev(key, sev)`
+
+**Python Submission Handler:**
+- Builds entry with `ostrc_q1_participation`, `ostrc_q2_training_volume`, `ostrc_q3_performance`, `ostrc_q4_pain`, `ostrc_score`
+- No longer sends `severity` (column made nullable for backward compat)
+
+**Database Migration:** `migrations/ostrc_questionnaire_update.sql`
+- Added 5 columns to `workout_pain_entries`: `ostrc_q1_participation` (0-3), `ostrc_q2_training_volume` (0-4), `ostrc_q3_performance` (0-4), `ostrc_q4_pain` (0-3), `ostrc_score` (0-100)
+- Made `severity` nullable (old rows keep 1-3 values, new rows use OSTRC)
+- CHECK constraints on all new columns
+- **Migration executed** in Supabase SQL Editor on Feb 16, 2026
+
+---
+
+**Files Modified:**
+
+| File | Changes |
+|------|---------|
+| `supabase_shiny.py` | All 7 features: responsive CSS, sRPE card + server function, smart rounding utilities + dashboard-wide application, ATL/CTL ratio in TSB hover, French month names on Pace vs HR, OSTRC body picker JS + CSS + submission handler |
+| `migrations/ostrc_questionnaire_update.sql` | NEW — OSTRC columns on `workout_pain_entries` |
+
+**Deployed:** Dashboard live on production (3 deployments during session)
+- ShinyApps.io: https://insquebec-sportsciences.shinyapps.io/saintlaurentselect_dashboard/
+
+---
+
+### Previous Session (Feb 12, 2026) - METRIC ROUNDING
 
 **Session Summary:**
 1. Cataloged all numeric metrics displayed in the dashboard
@@ -317,10 +467,11 @@ All previous troubleshooting around database issues was a red herring - the root
 - Created `_fmt_hover_vals()` helper in `comparison_plot()` for consistent formatting
 - Both primary and secondary Y-axis traces are covered in XY graph and comparison graph
 
-**Deployed:** Dashboard live on production (commit `90dd2cf`)
-- GitHub: Pushed to `main` (21 files, +4837/-636 lines — includes all Phases 3E-3I)
+**Deployed:** Dashboard live on production (commit `8111f14`)
+- GitHub: Force-pushed to `main` (21 files — includes all Phases 3E-3I)
 - ShinyApps.io: Deployed successfully to https://insquebec-sportsciences.shinyapps.io/saintlaurentselect_dashboard/
 - Lambda source files (`lambda/`) now tracked in git (excluding `package/` and `.zip`)
+- **Security fix:** Redacted Supabase JWT and athlete API keys from CLAUDE.md and AWS_SETUP_GUIDE.md; added `.mcp.json` to `.gitignore`
 
 ---
 
@@ -1261,7 +1412,7 @@ Claude Code is connected to Marc's Notion workspace via MCP. This enables readin
 |-------|---------|
 | `daily_workout_surveys` | Post-workout RPE, satisfaction, goals, capacite_execution (0-3) |
 | `weekly_wellness_surveys` | BRUMS, REST-Q, OSLO metrics |
-| `workout_pain_entries` | Structured pain data from body picker (one row per body part per survey) |
+| `workout_pain_entries` | OSTRC-H2 pain data from body picker (one row per body part per survey, 4 OSTRC questions + score) |
 
 ### Configuration Tables (3)
 
@@ -2184,6 +2335,36 @@ When athletes link Strava instead of watch, Strava strips Stryd biomechanics dat
   - Injury handler: `handle_save_lactate_test()` function (~line 8977)
 - **Deployed:** Live on production
 
+### Phase 3J: Questionnaire UX + Smart Rounding + OSTRC (Feb 16, 2026) ✅
+- **Questionnaire Layout Fixes:**
+  - Removed `max-width: 1200px` from weekly questionnaire (now full width)
+  - Added `.responsive-3col` CSS class for BRUMS/REST-Q sections (3 cols desktop, 2 cols mobile)
+- **sRPE Card:**
+  - New card below questionnaire pills: RPE × Duration with 7-day ACL and 28-day ATL lines
+  - Covers ALL activity types (running, cross-training, weight lifting)
+  - Server function `srpe_graph()` fetches from `daily_workout_surveys`
+- **Smart Rounding (Dashboard-Wide):**
+  - Added `smart_round()` and `smart_format()` utility functions
+  - Rule: `|value| < 20` → 1 decimal, else 0 decimals. Exceptions: LSS (`.2f`), pace (`MM:SS`), ratio (`.1f%`)
+  - Applied to: `run_duration_trend()`, `weekly_volume()`, `zone_time_longitudinal()`, `plot_xy()`, `comparison_plot()`
+  - Uses `customdata` pattern for dynamic formatting in Plotly hovertemplates
+- **ATL/CTL Ratio in Hover:**
+  - Formula: `(ATL / CTL) × 100` — embedded in TSB trace customdata
+  - Always visible in unified hover (no checkbox)
+- **French Month Names on Pace vs HR:**
+  - Added `_FR_MONTHS` dict and `_month_label()` helper
+  - Trend lines: `hoverinfo='skip'` → full hovertemplate with French month, pace, HR
+  - Scatter dots and legend also show French month names
+- **OSTRC-H2 Questionnaire:**
+  - Replaced severity dropdown (1-3) with 4 standardized OSTRC questions per body part
+  - Q1 Participation (0-3), Q2 Volume (0-4), Q3 Performance (0-4), Q4 Pain (0-3)
+  - Live OSTRC score (0-100%) in part header; SVG color by score thresholds
+  - JS: `calcOstrcScore()`, `ostrcClass()`, `_dailyBPSetQ()` replace severity functions
+  - Python: saves `ostrc_q1-q4` + `ostrc_score` instead of `severity`
+  - Migration: `migrations/ostrc_questionnaire_update.sql` (5 columns added, severity made nullable)
+- **Files Modified:** `supabase_shiny.py`, `migrations/ostrc_questionnaire_update.sql` (NEW)
+- **Deployed:** Live on production (3 deployments), migration executed in Supabase
+
 ### Phase 3I: Metric Rounding (Feb 12, 2026) ✅
 - **Hover Tooltip Rounding:**
   - CTL → `.1f` (was raw float with 10+ decimals)
@@ -2200,7 +2381,7 @@ When athletes link Strava instead of watch, Strava strips Stryd biomechanics dat
   - Created `_fmt_hover_vals()` helper in `comparison_plot()` for consistent formatting
   - Covers both primary and secondary Y-axis traces
 - **Files Modified:** `supabase_shiny.py` only
-- **Deployed:** Live on production (commit `90dd2cf`), pushed to GitHub
+- **Deployed:** Live on production (commit `8111f14`), pushed to GitHub
 
 ### Phase 3H: Multi-Feature Session (Feb 8, 2026) ✅
 - **Zone Error Fix:**
@@ -2401,6 +2582,13 @@ SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem rsc
 
 | Feature | Issue | Status |
 |---------|-------|--------|
+| **OSTRC Questionnaire** | Body picker severity was too simplistic (1-3) | ✅ Added (Feb 16, 2026) - Phase 3J |
+| **Smart Rounding** | Hover values showed raw floats with 10+ decimals | ✅ Fixed (Feb 16, 2026) - Phase 3J |
+| **ATL/CTL Ratio** | No way to see training balance percentage | ✅ Added (Feb 16, 2026) - Phase 3J |
+| **Pace/HR Month Names** | Trend line hovers showed nothing; legend showed YYYY-MM | ✅ Fixed (Feb 16, 2026) - Phase 3J |
+| **sRPE Card** | No subjective load visualization | ✅ Added (Feb 16, 2026) - Phase 3J |
+| **Weekly Questionnaire Width** | Constrained to 1200px max-width | ✅ Fixed (Feb 16, 2026) - Phase 3J |
+| **BRUMS/REST-Q Mobile** | Questions went 1-per-row on tablet | ✅ Fixed (Feb 16, 2026) - Phase 3J |
 | **Body Picker Not Clickable** | SVG parts visible but click handlers not attached | ✅ Fixed (Feb 8, 2026) - Phase 3H |
 | **Front/Back Cross-Selection** | Clicking front knee also selected back knee | ✅ Fixed (Feb 8, 2026) - Phase 3H |
 | **Pace/HR Graph Noise** | Too many dots on old data, no way to hide them | ✅ Fixed (Feb 8, 2026) - Phase 3H |
@@ -2440,11 +2628,11 @@ SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem rsc
 ### 🟡 Next Priorities
 
 1. **Prevention staff login** - New role for physio/prevention staff with restricted access
-2. **Git commit all changes** - Push lambda/ directory + session changes to GitHub
-3. **Dashboard enhancements** - RPE tracking table, wellness tracking table
+2. **Dashboard enhancements** - RPE tracking table, wellness tracking table
+3. **OSTRC analytics** - Trend graphs for OSTRC scores over time per body part (requires data accumulation)
 
 ---
 
 **END OF DOCUMENT**
 
-*Last Updated: February 12, 2026*
+*Last Updated: February 16, 2026*

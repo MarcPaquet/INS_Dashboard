@@ -17,6 +17,7 @@ import time
 import traceback
 from datetime import date, datetime, timedelta
 import functools
+import math
 import numpy as np
 import pandas as pd
 from matplotlib.ticker import FuncFormatter
@@ -34,6 +35,25 @@ from moving_time import compute_moving_time_strava
 
 # Import authentication utilities
 from auth_utils import verify_password, generate_password_prefix
+
+
+# ========== Smart Rounding Utilities ==========
+
+def smart_round(value):
+    """Round for display: 1 decimal if |value| < 20, else 0 decimals."""
+    if value is None or (isinstance(value, float) and (math.isnan(value) or math.isinf(value))):
+        return value
+    if abs(value) < 20:
+        return round(value, 1)
+    return round(value, 0)
+
+def smart_format(value):
+    """Format string for display: 1 decimal if |value| < 20, else 0 decimals."""
+    if value is None or (isinstance(value, float) and (math.isnan(value) or math.isinf(value))):
+        return ""
+    if abs(value) < 20:
+        return f"{value:.1f}"
+    return f"{value:.0f}"
 
 
 # ========== Performance Monitoring ==========
@@ -2141,7 +2161,22 @@ app_ui = ui.page_fluid(
           display: none !important;
         }
       }
-      
+
+      /* BRUMS/REST-Q responsive: 3 cols on tablet+, 2 cols on mobile */
+      @media (max-width: 992px) {
+        .responsive-3col .bslib-gap-spacing {
+          grid-template-columns: 1fr 1fr 1fr !important;
+        }
+        .responsive-3col .bslib-gap-spacing > * {
+          grid-column: auto !important;
+        }
+      }
+      @media (max-width: 768px) {
+        .responsive-3col .bslib-gap-spacing {
+          grid-template-columns: 1fr 1fr !important;
+        }
+      }
+
       /* Animations */
       @keyframes fadeIn {
         from { opacity: 0; transform: translateY(10px); }
@@ -2837,13 +2872,16 @@ def dashboard_content_ui():
                                                     .daily-bp { fill: #e5e7eb; stroke: #9ca3af; stroke-width: 1; cursor: pointer; transition: all 0.2s; }
                                                     .daily-bp:hover { fill: #d1d5db; stroke: #6b7280; }
                                                     .daily-bp.bp-selected { stroke-width: 2.5; }
-                                                    .daily-bp.sev-1 { fill: #86efac; stroke: #22c55e; }
-                                                    .daily-bp.sev-2 { fill: #fde047; stroke: #eab308; }
-                                                    .daily-bp.sev-3 { fill: #fca5a5; stroke: #ef4444; }
+                                                    .daily-bp.ostrc-low { fill: #86efac; stroke: #22c55e; }
+                                                    .daily-bp.ostrc-med { fill: #fde047; stroke: #eab308; }
+                                                    .daily-bp.ostrc-high { fill: #fca5a5; stroke: #ef4444; }
                                                     #daily-selected-list { margin-top: 0.5rem; }
-                                                    .daily-sel-item { display: inline-flex; align-items: center; gap: 0.3rem; background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 20px; padding: 0.25rem 0.75rem; margin: 0.25rem; font-size: 0.85rem; }
-                                                    .daily-sel-item .remove-btn { cursor: pointer; color: #ef4444; font-weight: bold; margin-left: 0.25rem; }
-                                                    .daily-sel-item select { border: none; background: transparent; font-size: 0.8rem; padding: 0; }
+                                                    .daily-sel-item { display: block; background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 8px; padding: 0.6rem 0.85rem; margin: 0.5rem 0; font-size: 0.95rem; }
+                                                    .daily-sel-item .sel-header { display: flex; align-items: center; justify-content: space-between; font-weight: 600; margin-bottom: 0.4rem; font-size: 1rem; }
+                                                    .daily-sel-item .remove-btn { cursor: pointer; color: #ef4444; font-weight: bold; font-size: 1.1rem; }
+                                                    .daily-sel-item .ostrc-q { display: flex; align-items: center; gap: 0.5rem; margin: 0.25rem 0; font-size: 0.95rem; }
+                                                    .daily-sel-item .ostrc-q label { flex: 0 0 auto; min-width: 110px; font-weight: 500; }
+                                                    .daily-sel-item .ostrc-q select { border: 1px solid #d1d5db; border-radius: 4px; background: white; font-size: 0.9rem; padding: 0.3rem 0.4rem; flex: 1; }
                                                 </style>
                                                 <!-- FRONT VIEW -->
                                                 <div data-view="front" style="text-align: center;">
@@ -2922,15 +2960,34 @@ def dashboard_content_ui():
                                                 };
                                                 var selections = {};
 
+                                                function calcOstrcScore(s) {
+                                                    return ((s.q1/3 + s.q2/4 + s.q3/4 + s.q4/3) / 4) * 100;
+                                                }
+                                                function ostrcClass(s) {
+                                                    var sc = calcOstrcScore(s);
+                                                    if (sc <= 25) return 'ostrc-low';
+                                                    if (sc <= 50) return 'ostrc-med';
+                                                    return 'ostrc-high';
+                                                }
+
+                                                function makeSelect(compositeKey, qName, val, opts) {
+                                                    var h = '<select onchange="window._dailyBPSetQ(\\''+compositeKey+'\\',\\''+qName+'\\',this.value)">';
+                                                    for (var i = 0; i < opts.length; i++) {
+                                                        h += '<option value="'+i+'"'+(val==i?' selected':'')+'>'+opts[i]+'</option>';
+                                                    }
+                                                    h += '</select>';
+                                                    return h;
+                                                }
+
                                                 function render() {
                                                     document.querySelectorAll('.daily-bp').forEach(function(el) {
                                                         var partId = el.dataset.part;
                                                         var viewEl = el.closest('[data-view]');
                                                         var view = viewEl ? viewEl.dataset.view : 'front';
                                                         var key = view + ':' + partId;
-                                                        el.classList.remove('bp-selected','sev-1','sev-2','sev-3');
+                                                        el.classList.remove('bp-selected','ostrc-low','ostrc-med','ostrc-high');
                                                         if (selections[key]) {
-                                                            el.classList.add('bp-selected','sev-'+selections[key].severity);
+                                                            el.classList.add('bp-selected', ostrcClass(selections[key]));
                                                         }
                                                     });
                                                     var listEl = document.getElementById('daily-selected-list');
@@ -2939,21 +2996,25 @@ def dashboard_content_ui():
                                                         listEl.innerHTML = '<p style="color:#999;font-size:0.85rem;margin:0;">Aucune zone selectionnee</p>';
                                                     } else {
                                                         var html = '';
+                                                        var Q1 = ['0 - Participation complete','1 - Participation avec problemes mineurs','2 - Participation avec problemes majeurs','3 - Incapable de participer'];
+                                                        var Q2 = ['0 - Aucune reduction','1 - Legere reduction','2 - Reduction moderee','3 - Reduction majeure','4 - Incapable de s\\'entrainer'];
+                                                        var Q3 = ['0 - Aucun impact','1 - Impact leger','2 - Impact modere','3 - Impact majeur','4 - Incapable de performer'];
+                                                        var Q4 = ['0 - Aucune douleur','1 - Douleur legere','2 - Douleur moderee','3 - Douleur severe'];
                                                         for (var compositeKey in selections) {
                                                             var info = selections[compositeKey];
                                                             var parts = compositeKey.split(':');
                                                             var partId = parts.length > 1 ? parts[1] : parts[0];
                                                             var lbl = LABELS[partId] || partId;
                                                             var viewLbl = info.view === 'front' ? 'av.' : 'arr.';
-                                                            html += '<span class="daily-sel-item">' +
-                                                                lbl + ' (' + viewLbl + ') ' +
-                                                                '<select onchange="window._dailyBPSetSev(\\''+compositeKey+'\\',this.value)">' +
-                                                                '<option value="1"'+(info.severity==1?' selected':'')+'>1-Legere</option>' +
-                                                                '<option value="2"'+(info.severity==2?' selected':'')+'>2-Moderee</option>' +
-                                                                '<option value="3"'+(info.severity==3?' selected':'')+'>3-Severe</option>' +
-                                                                '</select>' +
-                                                                '<span class="remove-btn" onclick="window._dailyBPRemove(\\''+compositeKey+'\\')">x</span>' +
-                                                                '</span>';
+                                                            var sc = calcOstrcScore(info);
+                                                            html += '<div class="daily-sel-item">' +
+                                                                '<div class="sel-header"><span>' + lbl + ' (' + viewLbl + ') — Score: ' + sc.toFixed(0) + '%</span>' +
+                                                                '<span class="remove-btn" onclick="window._dailyBPRemove(\\''+compositeKey+'\\')">x</span></div>' +
+                                                                '<div class="ostrc-q"><label>Participation:</label>' + makeSelect(compositeKey,'q1',info.q1,Q1) + '</div>' +
+                                                                '<div class="ostrc-q"><label>Volume:</label>' + makeSelect(compositeKey,'q2',info.q2,Q2) + '</div>' +
+                                                                '<div class="ostrc-q"><label>Performance:</label>' + makeSelect(compositeKey,'q3',info.q3,Q3) + '</div>' +
+                                                                '<div class="ostrc-q"><label>Douleur:</label>' + makeSelect(compositeKey,'q4',info.q4,Q4) + '</div>' +
+                                                                '</div>';
                                                         }
                                                         listEl.innerHTML = html;
                                                     }
@@ -2962,8 +3023,8 @@ def dashboard_content_ui():
                                                     }
                                                 }
 
-                                                window._dailyBPSetSev = function(key, sev) {
-                                                    if (selections[key]) { selections[key].severity = parseInt(sev); render(); }
+                                                window._dailyBPSetQ = function(key, qName, val) {
+                                                    if (selections[key]) { selections[key][qName] = parseInt(val); render(); }
                                                 };
                                                 window._dailyBPRemove = function(key) {
                                                     delete selections[key]; render();
@@ -2980,7 +3041,7 @@ def dashboard_content_ui():
                                                     if (selections[key]) {
                                                         delete selections[key];
                                                     } else {
-                                                        selections[key] = {view: view, severity: 1};
+                                                        selections[key] = {view: view, q1: 0, q2: 0, q3: 0, q4: 0};
                                                     }
                                                     render();
                                                 });
@@ -3090,7 +3151,7 @@ def dashboard_content_ui():
                     ui.card(
                         ui.card_header("Questionnaire Bien-être Hebdomadaire"),
                         ui.div(
-                            {"class": "survey-form", "style": "width: 100%; padding: 2rem; max-width: 1200px;"},
+                            {"class": "survey-form", "style": "width: 100%; padding: 2rem;"},
 
                             # Week selector
                             ui.div(
@@ -3134,6 +3195,7 @@ def dashboard_content_ui():
 
                             # S2: BRUMS
                             ui.div(
+                                {"class": "responsive-3col"},
                                 ui.tags.h4("2. État Psychologique (BRUMS)", style="color: #D92323; margin-bottom: 0.75rem; border-bottom: 2px solid #D92323; padding-bottom: 0.5rem;"),
                                 ui.tags.p("0=pas du tout | 2=modérément | 4=extrêmement", style="font-size: 0.9rem; color: #666; margin-bottom: 1rem; font-style: italic;"),
 
@@ -3162,6 +3224,7 @@ def dashboard_content_ui():
 
                             # S3: REST-Q
                             ui.div(
+                                {"class": "responsive-3col"},
                                 ui.tags.h4("3. Stress & Récupération", style="color: #D92323; margin-bottom: 0.75rem; border-bottom: 2px solid #D92323; padding-bottom: 0.5rem;"),
                                 ui.tags.p("0=jamais | 2=parfois | 4=toujours", style="font-size: 0.9rem; color: #666; margin-bottom: 1rem; font-style: italic;"),
 
@@ -3272,9 +3335,15 @@ def dashboard_content_ui():
                 ),
 
                 id="questionnaire_tabs"
+            ),
+            # sRPE (Subjective Charge) graph
+            ui.card(
+                ui.card_header("Charge subjective (sRPE)"),
+                ui.output_ui("srpe_graph"),
+                style="margin-top: 1rem;"
             )
         ),
-        
+
         # New tab: Manual Data Entry for Personal Records
         ui.nav_panel("Entrée de données manuelle",
             ui.output_ui("manual_entry_content")
@@ -3905,7 +3974,12 @@ def server(input, output, session):
         color_tsb = "#FF6B6B" if metric_mode != "dist" else "#FFA500"
 
         fig = go.Figure()
-        
+
+        # Pre-format values with smart rounding
+        ctl_fmt = [smart_format(v) for v in ctl_vals.values]
+        atl_fmt = [smart_format(v) for v in atl_vals.values]
+        tsb_fmt = [smart_format(v) for v in tsb_vals.values]
+
         # Fill area under CTL
         fig.add_trace(go.Scatter(
             x=idx, y=ctl_vals.values,
@@ -3914,27 +3988,32 @@ def server(input, output, session):
             line=dict(color=color28, width=3),
             name=legend_ctl,
             mode='lines',
-            hovertemplate=legend_ctl + "<br>%{x|%d %b %Y}<br>%{y:.1f}<extra></extra>"
+            customdata=ctl_fmt,
+            hovertemplate=legend_ctl + "<br>%{x|%d %b %Y}<br>%{customdata}<extra></extra>"
         ))
-        
+
         # ATL line
         fig.add_trace(go.Scatter(
             x=idx, y=atl_vals.values,
             line=dict(color=color7, width=2.5),
             name=legend_atl,
             mode='lines',
-            hovertemplate=legend_atl + "<br>%{x|%d %b %Y}<br>%{y:.1f}<extra></extra>"
+            customdata=atl_fmt,
+            hovertemplate=legend_atl + "<br>%{x|%d %b %Y}<br>%{customdata}<extra></extra>"
         ))
-        
-        # TSB line (dotted)
+
+        # TSB line (dotted) — includes ATL/CTL ratio in hover
+        ratio_vals = np.where(ctl_vals.values > 0, (atl_vals.values / ctl_vals.values) * 100, np.nan)
+        tsb_cd = [[t, f"{r:.1f}%" if not np.isnan(r) else ""] for t, r in zip(tsb_fmt, ratio_vals)]
         fig.add_trace(go.Scatter(
             x=idx, y=tsb_vals.values,
             line=dict(color=color_tsb, width=2, dash='dot'),
             name=legend_tsb,
             mode='lines',
-            hovertemplate=legend_tsb + "<br>%{x|%d %b %Y}<br>%{y:.1f}<extra></extra>"
+            customdata=tsb_cd,
+            hovertemplate=legend_tsb + "<br>%{x|%d %b %Y}<br>%{customdata[0]}<br><b>Ratio ATL/CTL: %{customdata[1]}</b><extra></extra>"
         ))
-        
+
         fig.update_layout(
             autosize=True,  # Responsive sizing for production
             title=dict(text="Moyenne pondérée exponentiellement — CTL / ATL / TSB", font=dict(size=16, color='#262626')),
@@ -4124,6 +4203,21 @@ def server(input, output, session):
             secs = int(sec_per_km % 60)
             return f"{mins}:{secs:02d}"
 
+        # French month names for hover display
+        _FR_MONTHS = {
+            1: "Janvier", 2: "Février", 3: "Mars", 4: "Avril",
+            5: "Mai", 6: "Juin", 7: "Juillet", 8: "Août",
+            9: "Septembre", 10: "Octobre", 11: "Novembre", 12: "Décembre"
+        }
+
+        def _month_label(yyyymm: str) -> str:
+            """Convert 'YYYY-MM' to 'Janvier 2025' style label."""
+            try:
+                y, m_ = yyyymm.split("-")
+                return f"{_FR_MONTHS[int(m_)]} {y}"
+            except Exception:
+                return yyyymm
+
         # Scatter : un nuage par mois pour une légende claire
         months = sorted(d["month"].unique())
         # Saint-Laurent Sélect color palette - reds, yellows, and warm tones
@@ -4140,13 +4234,14 @@ def server(input, output, session):
             color = colors_club[i % len(colors_club)]
 
             # Scatter points (toggled by checkbox)
+            month_lbl = _month_label(m)
             if show_dots:
                 fig.add_trace(go.Scatter(
                     x=gd["pace_skm"].values,
                     y=gd["avg_hr"].values,
                     mode='markers',
                     marker=dict(size=8, color=color, opacity=0.85),
-                    name=m,
+                    name=month_lbl,
                     customdata=[[format_pace(p)] for p in gd["pace_skm"].values],
                     hovertemplate='<b>%{fullData.name}</b><br>Allure: %{customdata[0]}<br>FC: %{y:.0f} bpm<extra></extra>'
                 ))
@@ -4159,14 +4254,16 @@ def server(input, output, session):
                 if not gdl.empty:
                     b = gdl.groupby("bin", as_index=False)["avg_hr"].mean().sort_values("bin")
                     b["avg_hr"] = b["avg_hr"].rolling(3, center=True, min_periods=1).mean()
+                    trend_cd = [[month_lbl, format_pace(p)] for p in b["bin"].values]
                     fig.add_trace(go.Scatter(
                         x=b["bin"].values,
                         y=b["avg_hr"].values,
                         mode='lines',
                         line=dict(color=color, width=2),
                         showlegend=not show_dots,
-                        name=m if not show_dots else None,
-                        hoverinfo='skip'
+                        name=month_lbl if not show_dots else None,
+                        customdata=trend_cd,
+                        hovertemplate='<b>%{customdata[0]}</b><br>Allure: %{customdata[1]}<br>FC: %{y:.0f} bpm<extra></extra>'
                     ))
 
         # Format X axis ticks (3:30 to 5:00 = 210 to 300 seconds/km)
@@ -4262,9 +4359,10 @@ def server(input, output, session):
             stackgroup='one',
             fillcolor=COLORS.get("VirtualRun"),
             line=dict(width=0.5, color=COLORS.get("VirtualRun")),
-            hovertemplate='<b>Tapis</b><br>%{y:.1f} km<extra></extra>'
+            customdata=[smart_format(v) + " km" for v in pivot["VirtualRun"].values],
+            hovertemplate='<b>Tapis</b><br>%{customdata}<extra></extra>'
         ))
-        
+
         fig.add_trace(go.Scatter(
             x=weeks, y=pivot["TrailRun"].values,
             name="Trail",
@@ -4272,9 +4370,10 @@ def server(input, output, session):
             stackgroup='one',
             fillcolor=COLORS.get("TrailRun"),
             line=dict(width=0.5, color=COLORS.get("TrailRun")),
-            hovertemplate='<b>Trail</b><br>%{y:.1f} km<extra></extra>'
+            customdata=[smart_format(v) + " km" for v in pivot["TrailRun"].values],
+            hovertemplate='<b>Trail</b><br>%{customdata}<extra></extra>'
         ))
-        
+
         fig.add_trace(go.Scatter(
             x=weeks, y=pivot["Run"].values,
             name="Run",
@@ -4282,7 +4381,8 @@ def server(input, output, session):
             stackgroup='one',
             fillcolor=COLORS.get("Run"),
             line=dict(width=0.5, color=COLORS.get("Run")),
-            hovertemplate='<b>Run</b><br>%{y:.1f} km<extra></extra>'
+            customdata=[smart_format(v) + " km" for v in pivot["Run"].values],
+            hovertemplate='<b>Run</b><br>%{customdata}<extra></extra>'
         ))
         
         fig.update_layout(
@@ -4744,7 +4844,8 @@ def server(input, output, session):
                     y=y_values,
                     name=label,
                     marker_color=ZONE_COLORS.get(zn, "#888888"),
-                    hovertemplate=f"{label}<br>Sem. %{{x|%d %b}}<br>%{{y:.1f}} min<extra></extra>"
+                    customdata=[smart_format(v) + " min" for v in y_values],
+                    hovertemplate=f"{label}<br>Sem. %{{x|%d %b}}<br>%{{customdata}}<extra></extra>"
                 ))
 
             # Group bars side-by-side within each week
@@ -4799,7 +4900,8 @@ def server(input, output, session):
                     name=label,
                     line=dict(color=zone_color, width=2.5),
                     mode='lines',
-                    hovertemplate=f"{label}<br>Sem. %{{x|%d %b}}<br>%{{y:.1f}} min<extra></extra>"
+                    customdata=[smart_format(v) + " min" for v in y_values],
+                    hovertemplate=f"{label}<br>Sem. %{{x|%d %b}}<br>%{{customdata}}<extra></extra>"
                 ))
 
             if not has_data:
@@ -4840,23 +4942,27 @@ def server(input, output, session):
                     x_acl_dates = [d.strftime('%Y-%m-%d') for d in acl_display["week_start"]]
 
                     # Add ACL line (dashed, red)
+                    acl_list = acl_values[valid_mask].tolist()
                     fig.add_trace(go.Scatter(
                         x=x_acl_dates,
-                        y=acl_values[valid_mask].tolist(),
+                        y=acl_list,
                         name=f"ACL ({atl_days}j)",
                         line=dict(color="#E63946", width=2, dash="dash"),
                         mode='lines',
-                        hovertemplate="ACL<br>Sem. %{x|%d %b}<br>%{y:.1f} min<extra></extra>"
+                        customdata=[smart_format(v) + " min" for v in acl_list],
+                        hovertemplate="ACL<br>Sem. %{x|%d %b}<br>%{customdata}<extra></extra>"
                     ))
 
                     # Add ATL line (solid, navy)
+                    atl_list = atl_values[valid_mask].tolist()
                     fig.add_trace(go.Scatter(
                         x=x_acl_dates,
-                        y=atl_values[valid_mask].tolist(),
+                        y=atl_list,
                         name=f"ATL ({ctl_days}j)",
                         line=dict(color="#1D3557", width=2.5),
                         mode='lines',
-                        hovertemplate="ATL<br>Sem. %{x|%d %b}<br>%{y:.1f} min<extra></extra>"
+                        customdata=[smart_format(v) + " min" for v in atl_list],
+                        hovertemplate="ATL<br>Sem. %{x|%d %b}<br>%{customdata}<extra></extra>"
                     ))
 
         # Monotony and Strain overlay lines (Phase 2Y)
@@ -4886,7 +4992,8 @@ def server(input, output, session):
                         line=dict(color="#8B5CF6", width=2, dash="dot"),
                         mode='lines',
                         yaxis='y2',
-                        hovertemplate="Monotonie<br>Sem. %{x|%d %b}<br>%{y:.2f}<extra></extra>"
+                        customdata=[smart_format(v) for v in y_monotony],
+                        hovertemplate="Monotonie<br>Sem. %{x|%d %b}<br>%{customdata}<extra></extra>"
                     ))
 
                 # Strain overlay (red dash-dot, yaxis3)
@@ -4899,7 +5006,8 @@ def server(input, output, session):
                         line=dict(color="#EF4444", width=2, dash="dashdot"),
                         mode='lines',
                         yaxis='y3',
-                        hovertemplate="Strain<br>Sem. %{x|%d %b}<br>%{y:.0f}<extra></extra>"
+                        customdata=[smart_format(v) for v in y_strain],
+                        hovertemplate="Strain<br>Sem. %{x|%d %b}<br>%{customdata}<extra></extra>"
                     ))
 
         # Set X-axis range
@@ -5275,18 +5383,17 @@ def server(input, output, session):
         y_is_time = d["y_fmt"] is not None
 
         # Rounding rules for float metrics in hover display
-        _hover_format = {
-            "vertical_oscillation": ".1f",
+        _hover_fixed_format = {
             "leg_spring_stiffness": ".2f",
         }
 
         if y_is_time:
             y_hover = [format_time(val) for val in y_values]
-        elif yvar1 in _hover_format:
-            fmt = _hover_format[yvar1]
+        elif yvar1 in _hover_fixed_format:
+            fmt = _hover_fixed_format[yvar1]
             y_hover = [f"{v:{fmt}}" if not np.isnan(v) else "N/A" for v in y_values]
         else:
-            y_hover = y_values
+            y_hover = [smart_format(v) if not np.isnan(v) else "N/A" for v in y_values]
         
         # Create the figure (with or without secondary Y-axis)
         if has_secondary:
@@ -5314,11 +5421,11 @@ def server(input, output, session):
                 y2_is_time = y2_fmt is not None
                 if y2_is_time:
                     y2_hover = [format_time(val) for val in y2]
-                elif yvar2 in _hover_format:
-                    fmt = _hover_format[yvar2]
+                elif yvar2 in _hover_fixed_format:
+                    fmt = _hover_fixed_format[yvar2]
                     y2_hover = [f"{v:{fmt}}" if not np.isnan(v) else "N/A" for v in y2]
                 else:
-                    y2_hover = y2
+                    y2_hover = [smart_format(v) if not np.isnan(v) else "N/A" for v in y2]
                 
                 fig.add_trace(
                     go.Scatter(
@@ -6638,17 +6745,18 @@ def server(input, output, session):
             # Check if Y-axis is pace (needs MM:SS formatting)
             is_pace_y1 = yvar == "pace" or "Allure" in y1_label
 
-            # Rounding rules for float metrics in hover display
-            _comp_hover_format = {
-                "vertical_oscillation": ".1f",
+            # Fixed format exceptions (LSS keeps .2f)
+            _comp_fixed_format = {
                 "leg_spring_stiffness": ".2f",
             }
 
             def _fmt_hover_vals(values, is_pace, var_name):
                 if is_pace:
                     return [format_pace(p) for p in values]
-                fmt = _comp_hover_format.get(var_name, ".1f")
-                return [f"{v:{fmt}}" for v in values]
+                if var_name in _comp_fixed_format:
+                    fmt = _comp_fixed_format[var_name]
+                    return [f"{v:{fmt}}" for v in values]
+                return [smart_format(v) for v in values]
 
             # Create formatted time labels for hover
             x1_formatted = [format_seconds_to_time(t) for t in x1]
@@ -7930,11 +8038,20 @@ def server(input, output, session):
                             _, body_part = composite_key.split(':', 1)
                         else:
                             body_part = composite_key
+                        q1 = int(part_info.get("q1", 0))
+                        q2 = int(part_info.get("q2", 0))
+                        q3 = int(part_info.get("q3", 0))
+                        q4 = int(part_info.get("q4", 0))
+                        ostrc_score = round(((q1/3 + q2/4 + q3/4 + q4/3) / 4) * 100, 1)
                         entry = {
                             "survey_id": survey_id,
                             "body_part": body_part,
                             "body_view": part_info.get("view", "front"),
-                            "severity": int(part_info.get("severity", 1))
+                            "ostrc_q1_participation": q1,
+                            "ostrc_q2_training_volume": q2,
+                            "ostrc_q3_performance": q3,
+                            "ostrc_q4_pain": q4,
+                            "ostrc_score": ostrc_score
                         }
                         pain_entries.append(entry)
 
@@ -8208,6 +8325,123 @@ def server(input, output, session):
                     style="padding: 1.5rem; background: #fee; border: 2px solid #dc2626; border-radius: 8px; margin-top: 1rem;"
                 )
             )
+
+    # ========== sRPE (Subjective Charge) Graph ==========
+
+    @output
+    @render.ui
+    def srpe_graph():
+        """Charge subjective = RPE (CR10) x Duration (min), with ACL/ATL lines."""
+        if not is_authenticated.get():
+            return ui.div()
+
+        athlete_id = get_effective_athlete_id()
+        if not athlete_id:
+            return plotly_to_html(_create_empty_plotly_fig("Aucun athlete selectionne", height=360))
+
+        try:
+            surveys = supa_select(
+                "daily_workout_surveys",
+                select="date_seance,rpe_cr10,duree_min",
+                params={"athlete_id": f"eq.{athlete_id}"},
+                order="date_seance.asc",
+                limit=10000
+            )
+
+            if surveys.empty:
+                return plotly_to_html(_create_empty_plotly_fig("Aucune donnee sRPE disponible", height=360))
+
+            surveys = surveys.dropna(subset=["rpe_cr10", "duree_min"])
+            if surveys.empty:
+                return plotly_to_html(_create_empty_plotly_fig("Aucune donnee sRPE disponible", height=360))
+
+            surveys["rpe_cr10"] = pd.to_numeric(surveys["rpe_cr10"], errors="coerce")
+            surveys["duree_min"] = pd.to_numeric(surveys["duree_min"], errors="coerce")
+            surveys["srpe"] = surveys["rpe_cr10"] * surveys["duree_min"]
+            surveys["date_seance"] = pd.to_datetime(surveys["date_seance"])
+
+            surveys = surveys.dropna(subset=["srpe"])
+            if surveys.empty:
+                return plotly_to_html(_create_empty_plotly_fig("Aucune donnee sRPE disponible", height=360))
+
+            daily = surveys.groupby("date_seance")["srpe"].sum()
+            daily = daily.sort_index()
+
+            full_idx = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
+            daily = daily.reindex(full_idx, fill_value=0.0)
+
+            atl_days = 7
+            ctl_days = 28
+
+            acl = daily.ewm(span=atl_days, min_periods=1, adjust=False).mean()
+            atl = daily.ewm(span=ctl_days, min_periods=1, adjust=False).mean()
+
+            idx = [d.strftime("%Y-%m-%d") for d in daily.index]
+            daily_vals = daily.values.tolist()
+            acl_vals = acl.values.tolist()
+            atl_vals = atl.values.tolist()
+
+            non_zero_x = [idx[i] for i in range(len(idx)) if daily_vals[i] > 0]
+            non_zero_y = [daily_vals[i] for i in range(len(idx)) if daily_vals[i] > 0]
+
+            fig = go.Figure()
+
+            fig.add_trace(go.Bar(
+                x=non_zero_x, y=non_zero_y,
+                marker_color="rgba(217, 35, 35, 0.3)",
+                name="sRPE",
+                hovertemplate="sRPE<br>%{x|%d %b %Y}<br>%{y:.0f}<extra></extra>"
+            ))
+
+            fig.add_trace(go.Scatter(
+                x=idx, y=acl_vals,
+                line=dict(color="#D92323", width=2.5),
+                name=f"ACL {atl_days}j",
+                mode="lines",
+                hovertemplate=f"ACL {atl_days}j<br>" + "%{x|%d %b %Y}<br>%{y:.0f}<extra></extra>"
+            ))
+
+            fig.add_trace(go.Scatter(
+                x=idx, y=atl_vals,
+                line=dict(color="#1e3a5f", width=2.5),
+                name=f"ATL {ctl_days}j",
+                mode="lines",
+                hovertemplate=f"ATL {ctl_days}j<br>" + "%{x|%d %b %Y}<br>%{y:.0f}<extra></extra>"
+            ))
+
+            fig.update_layout(
+                autosize=True,
+                title=dict(
+                    text="Charge subjective (RPE x Duree) — ACL / ATL",
+                    font=dict(size=16, color="#262626")
+                ),
+                xaxis=dict(
+                    title=dict(text="Date", font=dict(size=14)),
+                    type="date",
+                    tickformat="%d %b",
+                    showgrid=True,
+                    gridcolor="rgba(128, 128, 128, 0.2)",
+                    tickfont=dict(size=12)
+                ),
+                yaxis=dict(
+                    title=dict(text="sRPE (u.a.)", font=dict(size=14)),
+                    showgrid=True,
+                    gridcolor="rgba(128, 128, 128, 0.2)",
+                    tickfont=dict(size=12)
+                ),
+                plot_bgcolor="white",
+                height=400,
+                hovermode="x unified",
+                legend=dict(x=0, y=1, bgcolor="rgba(255,255,255,0.9)", font=dict(size=13)),
+                margin=dict(l=70, r=30, t=70, b=70),
+                bargap=0.3
+            )
+
+            return plotly_to_html(fig)
+
+        except Exception as e:
+            print(f"[sRPE] Error rendering sRPE graph: {e}", flush=True)
+            return plotly_to_html(_create_empty_plotly_fig(f"Erreur: {str(e)[:100]}", height=360))
 
     # Handle survey submission (OLD - will be replaced)
     @reactive.Effect
