@@ -93,43 +93,11 @@ Better Training Decisions
 
 ### Club Members (23 athletes + 2 coaches)
 
-**Existing Athletes (5):**
-| Member | Intervals.icu ID | Role |
-|--------|------------------|------|
-| Matthew Beaudet | `i344978` | athlete |
-| Kevin Robertson | `i344979` | athlete |
-| Kevin A. Robertson | `i344980` | athlete |
-| Zakary Mama-Yari | `i347434` | athlete |
-| Sophie Courville | `i95073` | athlete |
+> **Full roster with names, Intervals.icu IDs, and credentials → see `SECRETS.local`**
 
-**New Athletes with Intervals.icu (13):**
-| Member | Intervals.icu ID | Role |
-|--------|------------------|------|
-| Alex Larochelle | `i453408` | athlete |
-| Alexandrine Coursol | `i454587` | athlete |
-| Doan Tran | `i453651` | athlete |
-| Jade Essabar | `i453683` | athlete |
-| Marc-Andre Trudeau Perron | `i453625` | athlete |
-| Marine Garnier | `i197667` | athlete |
-| Myriam Poirier | `i453790` | athlete |
-| Nazim Berrichi | `i453396` | athlete |
-| Robin Lefebvre | `i453411` | athlete |
-| Yassine Aber | `i453944` | athlete |
-| Evans Stephen | `i454589` | athlete |
-| Cedrik Flipo | `i486574` | athlete |
-| Renaud Bordeleau | `i482119` | athlete |
-
-**Login-Only Athletes (3) - No data import:**
-| Member | Intervals.icu ID | Note |
-|--------|------------------|------|
-| Genevieve Paquin | - | No Intervals.icu |
-| Simone Plourde | - | No Intervals.icu |
-| Elie Nayrand | `i453407` | **API KEY ERROR** |
-
-**Coach (1 shared account for Samuel & Kerrian):**
-| Login | Password | Role |
-|-------|----------|------|
-| Coach | Coach | coach |
+- 5 existing athletes + 13 new athletes with Intervals.icu accounts
+- 3 login-only athletes (no Intervals.icu data import)
+- 1 shared coach account (Samuel & Kerrian)
 
 **Note:** Roster updated Jan 14, 2026. Users created, SQL migration executed. **PENDING: Data import (dry run then full import).**
 
@@ -607,7 +575,7 @@ weekly_df = weekly_df.rename(columns={"index": "week_start"})
 
 **Findings:**
 - Database: 2.4M rows LSS > 0, 515K rows LSS = 0, 3.2M rows LSS NULL
-- Only 2 athletes have any LSS data (Matthew Beaudet, Kevin A. Robertson)
+- Only 2 athletes have any LSS data (direct watch sync only)
 - Downloaded FIT files from Intervals.icu API → `developer_data_id` messages exist but NO `field_description` messages
 - **Conclusion:** Intervals.icu API strips Stryd developer data from FIT file exports
 - LSS data only comes from watch sync directly (not via Intervals.icu API)
@@ -796,11 +764,7 @@ Dashboard shows status
 | `.env` | Added `LAMBDA_FUNCTION_URL` and `LAMBDA_REFRESH_TOKEN` |
 | `shiny_env.env` | Added same Lambda config for backup |
 
-**Environment Variables Added:**
-```
-LAMBDA_FUNCTION_URL=https://yr3tu22orzlav5jwoxly3c5rmu0fnxns.lambda-url.ca-central-1.on.aws/
-LAMBDA_REFRESH_TOKEN=<secret>
-```
+**Environment Variables Added:** `LAMBDA_FUNCTION_URL` and `LAMBDA_REFRESH_TOKEN` — see `SECRETS.local` for values.
 
 ---
 
@@ -840,7 +804,7 @@ CREATE TABLE sync_log (
 ### Previous Session (Jan 29, 2026) - FAST LOGIN + QUESTIONNAIRES VALIDATED
 
 **Session Summary:**
-1. Validated questionnaires are working correctly (tested with Kevin Robertson)
+1. Validated questionnaires are working correctly (tested with an athlete)
 2. Deleted test questionnaire data from database
 3. Updated lactate test form - Distance field now beside Lactate field
 4. Fixed slow login (7-10 seconds → <1 second)
@@ -850,7 +814,7 @@ CREATE TABLE sync_log (
 **Feature 1: Questionnaire Validation**
 - Tested daily workout survey and weekly wellness survey
 - Both working correctly and saving to database
-- Deleted test data for Kevin Robertson (week Jan 26, activity May 2)
+- Deleted test data for one athlete (week Jan 26, activity May 2)
 
 **Feature 2: Lactate Form UI Update**
 - Moved Distance field to appear beside Lactate field for lactate tests
@@ -1001,10 +965,10 @@ Command: python intervals_hybrid_to_supabase.py --oldest 2025-12-15 --newest 202
 | HR coverage | 238/243 (98%) ✅ |
 | Wellness data | 12/18 athletes ✅ |
 
-**Athletes Without Activities (6):** Kevin Robertson, Yassine Aber, Evans Stephen, Ilyass Kasmi (no running activities in period), plus some new athletes not yet logging.
+**Athletes Without Activities (6):** 4 athletes had no running activities in period, plus some new athletes not yet logging.
 
 **Known Issues (Working as Expected):**
-- Sophie Courville & Emma Veilleux: FIT firmware bug → Stream fallback works perfectly
+- 2 athletes: FIT firmware bug → Stream fallback works perfectly
 - 5 activities without HR → Athletes weren't wearing HR monitors
 
 ---
@@ -1179,7 +1143,7 @@ When a user selects a date range that spans multiple zone configurations (e.g., 
 **Every solution MUST work for all athletes without hardcoded logic.**
 
 ```
-❌ BAD:  if athlete == "Sophie": use_streams()
+❌ BAD:  if athlete == "specific_name": use_streams()
 ✅ GOOD: if fit_parse_fails: use_streams()
 ```
 
@@ -1476,7 +1440,7 @@ Claude Code is connected to Marc's Notion workspace via MCP. This enables readin
 ```
 FIT file → Parse success → Full data
          → Parse fails → Streams API fallback
-                       → Sophie's watch has firmware issue
+                       → Some watches have firmware issues
                        → Streams work perfectly
 ```
 
@@ -1635,12 +1599,9 @@ def get_secrets():
 ```bash
 # PARALLEL bulk import (all athletes simultaneously, ~2-4 hours total)
 # Each athlete runs: activities + wellness, skip weather
-python intervals_hybrid_to_supabase.py --athlete "Matthew Beaudet" --oldest 2021-01-01 --newest 2024-12-31 --wellness-oldest 2021-01-01 --wellness-newest 2024-12-31 --skip-weather &
-python intervals_hybrid_to_supabase.py --athlete "Kevin Robertson" --oldest 2021-01-01 --newest 2024-12-31 --wellness-oldest 2021-01-01 --wellness-newest 2024-12-31 --skip-weather &
-python intervals_hybrid_to_supabase.py --athlete "Kevin A. Robertson" --oldest 2021-01-01 --newest 2024-12-31 --wellness-oldest 2021-01-01 --wellness-newest 2024-12-31 --skip-weather &
-python intervals_hybrid_to_supabase.py --athlete "Zakary Mama-Yari" --oldest 2021-01-01 --newest 2024-12-31 --wellness-oldest 2021-01-01 --wellness-newest 2024-12-31 --skip-weather &
-python intervals_hybrid_to_supabase.py --athlete "Sophie Courville" --oldest 2021-01-01 --newest 2024-12-31 --wellness-oldest 2021-01-01 --wellness-newest 2024-12-31 --skip-weather &
-# Add more athletes as needed (up to 12-15 parallel processes is safe)
+python intervals_hybrid_to_supabase.py --athlete "<Athlete Name>" --oldest 2021-01-01 --newest 2024-12-31 --wellness-oldest 2021-01-01 --wellness-newest 2024-12-31 --skip-weather &
+# Repeat for each athlete (see SECRETS.local for full roster)
+# Up to 12-15 parallel processes is safe
 wait  # Wait for all to complete
 ```
 
@@ -1701,8 +1662,8 @@ wait  # Wait for all to complete
 3. Upload scripts + credentials
 4. Run all athletes in parallel with `--skip-weather` + wellness:
    ```bash
-   python intervals_hybrid_to_supabase.py --athlete "Matthew Beaudet" --oldest 2021-01-01 --newest 2024-12-31 --wellness-oldest 2021-01-01 --wellness-newest 2024-12-31 --skip-weather &
-   # ... (repeat for all 12-15 athletes)
+   python intervals_hybrid_to_supabase.py --athlete "<Athlete Name>" --oldest 2021-01-01 --newest 2024-12-31 --wellness-oldest 2021-01-01 --wellness-newest 2024-12-31 --skip-weather &
+   # ... (repeat for all athletes — see SECRETS.local for roster)
    wait
    ```
 5. Verify data in Supabase
@@ -1781,7 +1742,7 @@ When athletes link Strava instead of watch, Strava strips Stryd biomechanics dat
 
 ### Phase 2F: Production Deployment (Nov 23, 2025) ✅
 - Dashboard live on ShinyApps.io
-- App ID: 16149191
+- App ID: see `SECRETS.local`
 - All validation checks passed
 
 ### Phase 2G: Performance Optimization (Nov 28, 2025) ✅
@@ -1884,7 +1845,7 @@ When athletes link Strava instead of watch, Strava strips Stryd biomechanics dat
 - **No GPS Data Handling** - Clear error message for athletes without pace data
   - Added check: `if max_ctl < 0.1 and max_atl < 0.1`
   - Displays "Aucune donnee GPS/allure pour cet athlete" instead of empty graph
-  - Kevin A. Robertson (i344980) now shows appropriate message
+  - Athletes without GPS data now show appropriate message
 - **Comparison Graph Error Handling** - Better validation for empty data
   - Added checks after NaN cleaning to prevent "extends to zero" errors
 - **Deployed:** All fixes live on production
@@ -2261,7 +2222,7 @@ When athletes link Strava instead of watch, Strava strips Stryd biomechanics dat
 ### Phase 3E: Fast Login + Questionnaire Validation (Jan 29, 2026) ✅
 - **Questionnaire Validation:**
   - Tested daily workout and weekly wellness surveys - both working
-  - Deleted test data for Kevin Robertson
+  - Deleted test data for one athlete
 - **Lactate Form UI Update:**
   - Distance field now beside Lactate field for lactate tests
   - Distance | Race Time side by side for races
@@ -2444,14 +2405,12 @@ When athletes link Strava instead of watch, Strava strips Stryd biomechanics dat
 ## 📝 QUICK REFERENCE
 
 ### Athlete API Keys Location
-```
-~/Documents/INS/athletes.json.local
-```
+See `SECRETS.local` and `athletes.json.local`
 
 ### Environment Variables
 ```
-SUPABASE_URL=https://vqcqqfddgnvhcrxcaxjf.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=<secret>
+SUPABASE_URL=<see SECRETS.local>
+SUPABASE_SERVICE_ROLE_KEY=<see SECRETS.local>
 OM_TIMEOUT=10
 AQ_TIMEOUT=10
 ```
@@ -2463,7 +2422,7 @@ AQ_TIMEOUT=10
 python intervals_hybrid_to_supabase.py --oldest 2025-11-25 --newest 2025-11-28 --dry-run
 
 # Real import (specific athlete)
-python intervals_hybrid_to_supabase.py --athlete "Matthew Beaudet" --oldest 2021-01-01 --newest 2024-12-31
+python intervals_hybrid_to_supabase.py --athlete "<Athlete Name>" --oldest 2021-01-01 --newest 2024-12-31
 
 # Historical wellness import (date range)
 python intervals_hybrid_to_supabase.py --wellness-oldest 2023-01-01 --wellness-newest 2025-12-01
@@ -2483,7 +2442,7 @@ shiny run supabase_shiny.py
 SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem rsconnect deploy shiny . \
   --entrypoint app:app \
   --name insquebec-sportsciences \
-  --app-id 16149191 \
+  --app-id <APP_ID from SECRETS.local> \
   --exclude ".cache" \
   --exclude "*.parquet" \
   --exclude "rsconnect-python" \
@@ -2519,7 +2478,7 @@ SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem rsc
 - [ ] Do NOT create `.python-version` file (ShinyApps.io only supports Python 3.9.x)
 - [ ] Use `app.py` as entrypoint (wrapper with error handling)
 - [ ] `requirements.txt` should have NO version constraints (just package names)
-- [ ] Use `--app-id 16149191` to update existing app (NOT create new one)
+- [ ] Use `--app-id <APP_ID from SECRETS.local>` to update existing app (NOT create new one)
 - [ ] Exclude all unnecessary files (see command above)
 - [ ] **NEVER use shinywidgets** - causes crashes on ShinyApps.io (use `plotly_to_html()` instead)
 
@@ -2549,11 +2508,10 @@ SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem rsc
 
 | App Name | App ID | Status |
 |----------|--------|--------|
-| saintlaurentselect_dashboard | 16149191 | ✅ PRODUCTION |
-| ins_dashboard | 16146104 | ⏸️ Not in use |
+| saintlaurentselect_dashboard | See `SECRETS.local` | ✅ PRODUCTION |
 
 ### Supabase Database
-- **Project:** vqcqqfddgnvhcrxcaxjf
+- **Project:** See `SECRETS.local`
 - **Region:** Default
 - **Tables:** 16 (athlete, users, activity_metadata, activity, activity_intervals, wellness, daily_workout_surveys, weekly_wellness_surveys, personal_records, personal_records_history, athlete_training_zones, activity_zone_time, weekly_zone_time, lactate_tests, weekly_monotony_strain, sync_log, workout_pain_entries)
 
