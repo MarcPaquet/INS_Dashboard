@@ -82,6 +82,9 @@ COLORS = {
 
 RUN_TYPES = {"run", "trailrun", "virtualrun", "treadmill"}
 
+# Questionnaire cutoff date — athletes can only fill questionnaires for activities/weeks from this date
+QUESTIONNAIRE_CUTOFF_DATE = "2026-02-23"
+
 # Zone colors for distinct mode (consistent across sessions)
 # Gradient from blue (slowest/recovery) to red (fastest)
 ZONE_COLORS = {
@@ -2832,7 +2835,11 @@ def dashboard_content_ui():
                                 style="margin-bottom: 2rem; padding: 1.25rem; background: #fef2f2; border-radius: 8px; border-left: 4px solid #D92323;"
                             ),
 
-                            # S2: Effort perçu et atteinte des objectifs
+                            # Hidden input for activity type detection (controls conditional panels)
+                            ui.input_text("_daily_is_running", "", value="true"),
+                            ui.tags.script("document.getElementById('_daily_is_running').parentElement.style.display='none';"),
+
+                            # S2: Effort perçu (always visible) + atteinte des objectifs (running-only)
                             ui.div(
                                 ui.tags.h4("Effort et Objectifs", style="color: #D92323; margin-bottom: 0.75rem; border-bottom: 2px solid #D92323; padding-bottom: 0.5rem;"),
 
@@ -2842,16 +2849,21 @@ def dashboard_content_ui():
                                     "0 = Rien du tout\n1 = Très, très léger (juste perceptible)\n2 = Très léger\n3 = Léger\n4 = Modéré\n5 = Fort\n6 = Plus fort\n7 = Très fort (intense)\n8 = \n9 = Très, très fort (presque max)\n10 = Maximal"
                                 ),
 
-                                scale_with_tooltip(
-                                    "Atteinte des objectifs",
-                                    ui.input_slider("daily_atteinte_obj", "", min=0, max=10, value=7, step=1, width="100%"),
-                                    ""  # Placeholder - description to be added later
+                                ui.panel_conditional(
+                                    "input._daily_is_running === 'true'",
+                                    scale_with_tooltip(
+                                        "Atteinte des objectifs",
+                                        ui.input_slider("daily_atteinte_obj", "", min=0, max=10, value=7, step=1, width="100%"),
+                                        ""  # Placeholder - description to be added later
+                                    ),
                                 ),
 
                                 style="margin-bottom: 1.5rem; padding: 1.25rem; background: #f9f9f9; border-radius: 8px;"
                             ),
 
-                            # S3: Douleur/Inconfort
+                            # S3: Douleur/Inconfort (running-only)
+                            ui.panel_conditional(
+                                "input._daily_is_running === 'true'",
                             ui.div(
                                 ui.tags.h4("Douleur / Inconfort", style="color: #D92323; margin-bottom: 0.75rem; border-bottom: 2px solid #D92323; padding-bottom: 0.5rem;"),
 
@@ -3010,10 +3022,10 @@ def dashboard_content_ui():
                                                             html += '<div class="daily-sel-item">' +
                                                                 '<div class="sel-header"><span>' + lbl + ' (' + viewLbl + ') — Score: ' + sc.toFixed(0) + '%</span>' +
                                                                 '<span class="remove-btn" onclick="window._dailyBPRemove(\\''+compositeKey+'\\')">x</span></div>' +
-                                                                '<div class="ostrc-q"><label>Participation:</label>' + makeSelect(compositeKey,'q1',info.q1,Q1) + '</div>' +
-                                                                '<div class="ostrc-q"><label>Volume:</label>' + makeSelect(compositeKey,'q2',info.q2,Q2) + '</div>' +
-                                                                '<div class="ostrc-q"><label>Performance:</label>' + makeSelect(compositeKey,'q3',info.q3,Q3) + '</div>' +
-                                                                '<div class="ostrc-q"><label>Douleur:</label>' + makeSelect(compositeKey,'q4',info.q4,Q4) + '</div>' +
+                                                                '<div class="ostrc-q"><label>Participation: <span class="tooltip-trigger" data-tooltip="0 = Participation compl\u00e8te\\n1 = Probl\u00e8mes mineurs\\n2 = Probl\u00e8mes majeurs\\n3 = Incapable de participer">&#9650;</span></label>' + makeSelect(compositeKey,'q1',info.q1,Q1) + '</div>' +
+                                                                '<div class="ostrc-q"><label>Volume: <span class="tooltip-trigger" data-tooltip="0 = Aucune r\u00e9duction\\n1 = L\u00e9g\u00e8re r\u00e9duction\\n2 = R\u00e9duction mod\u00e9r\u00e9e\\n3 = R\u00e9duction majeure\\n4 = Incapable de s\\\'entra\u00eener">&#9650;</span></label>' + makeSelect(compositeKey,'q2',info.q2,Q2) + '</div>' +
+                                                                '<div class="ostrc-q"><label>Performance: <span class="tooltip-trigger" data-tooltip="0 = Aucun impact\\n1 = Impact l\u00e9ger\\n2 = Impact mod\u00e9r\u00e9\\n3 = Impact majeur\\n4 = Incapable de performer">&#9650;</span></label>' + makeSelect(compositeKey,'q3',info.q3,Q3) + '</div>' +
+                                                                '<div class="ostrc-q"><label>Douleur: <span class="tooltip-trigger" data-tooltip="0 = Aucune douleur\\n1 = Douleur l\u00e9g\u00e8re\\n2 = Douleur mod\u00e9r\u00e9e\\n3 = Douleur s\u00e9v\u00e8re">&#9650;</span></label>' + makeSelect(compositeKey,'q4',info.q4,Q4) + '</div>' +
                                                                 '</div>';
                                                         }
                                                         listEl.innerHTML = html;
@@ -3050,58 +3062,41 @@ def dashboard_content_ui():
                                         """),
 
 
-                                        # Capacity to execute training (0-3 scale)
-                                        ui.div(
-                                            ui.tags.label("Capacite d'execution de l'entrainement", style="font-weight: 600; margin-bottom: 0.5rem; display: block;"),
-                                            ui.input_radio_buttons(
-                                                "daily_capacite_execution",
-                                                "",
-                                                choices={
-                                                    "0": "0 - Non complete",
-                                                    "1": "1 - Fortement limite",
-                                                    "2": "2 - Partiellement limite",
-                                                    "3": "3 - Pleine capacite"
-                                                },
-                                                selected="3",
-                                                inline=True
-                                            ),
-                                            style="margin-bottom: 1rem;"
-                                        ),
-
-                                        ui.div(
-                                            ui.tags.label("La douleur a-t-elle reduit votre participation ou performance ?", style="font-weight: 600; margin-bottom: 0.5rem; display: block;"),
-                                            ui.input_radio_buttons("daily_douleur_impact", "", choices=["Non", "Oui"], selected="Non", inline=True),
-                                            style="margin-bottom: 1rem;"
-                                        ),
-
                                         style="padding-left: 1.5rem; border-left: 3px solid #D92323; margin-top: 1rem;"
                                     )
                                 ),
 
                                 style="margin-bottom: 1.5rem; padding: 1.25rem; background: #f9f9f9; border-radius: 8px;"
                             ),
+                            ),  # end panel_conditional for S3
 
-                            # S4: Contexte
-                            ui.div(
-                                ui.tags.h4("Contexte", style="color: #D92323; margin-bottom: 0.75rem; border-bottom: 2px solid #D92323; padding-bottom: 0.5rem;"),
-
+                            # S4: Contexte (running-only)
+                            ui.panel_conditional(
+                                "input._daily_is_running === 'true'",
                                 ui.div(
-                                    ui.tags.label("Séance en groupe ?", style="font-weight: 600; margin-bottom: 0.5rem; display: block;"),
-                                    ui.input_radio_buttons("daily_en_groupe", "", choices=["Non", "Oui"], selected="Non", inline=True),
-                                    style="margin-bottom: 1rem;"
-                                ),
+                                    ui.tags.h4("Contexte", style="color: #D92323; margin-bottom: 0.75rem; border-bottom: 2px solid #D92323; padding-bottom: 0.5rem;"),
 
-                                style="margin-bottom: 1.5rem;"
+                                    ui.div(
+                                        ui.tags.label("Séance en groupe ?", style="font-weight: 600; margin-bottom: 0.5rem; display: block;"),
+                                        ui.input_radio_buttons("daily_en_groupe", "", choices=["Non", "Oui"], selected="Non", inline=True),
+                                        style="margin-bottom: 1rem;"
+                                    ),
+
+                                    style="margin-bottom: 1.5rem;"
+                                ),
                             ),
 
-                            # S5: Détails
+                            # S5: Détails (commentaires always visible, allures/modifs running-only)
                             ui.div(
                                 ui.tags.h4("Détails de la Séance", style="color: #D92323; margin-bottom: 0.75rem; border-bottom: 2px solid #D92323; padding-bottom: 0.5rem;"),
 
-                                ui.div(
-                                    ui.tags.label("Allures / détails techniques", style="font-weight: 600; margin-bottom: 0.5rem; display: block;"),
-                                    ui.input_text("daily_allures", "", placeholder="Ex: 10×400m à 76–74s, récup 1'"),
-                                    style="margin-bottom: 1rem;"
+                                ui.panel_conditional(
+                                    "input._daily_is_running === 'true'",
+                                    ui.div(
+                                        ui.tags.label("Allures / détails techniques", style="font-weight: 600; margin-bottom: 0.5rem; display: block;"),
+                                        ui.input_text("daily_allures", "", placeholder="Ex: 10×400m à 76–74s, récup 1'"),
+                                        style="margin-bottom: 1rem;"
+                                    ),
                                 ),
 
                                 ui.div(
@@ -3110,19 +3105,22 @@ def dashboard_content_ui():
                                     style="margin-bottom: 1rem;"
                                 ),
 
-                                ui.div(
-                                    ui.tags.label("Avez-vous modifié l'entraînement ?", style="font-weight: 600; margin-bottom: 0.5rem; display: block;"),
-                                    ui.input_radio_buttons("daily_modifs_oui", "", choices=["Non", "Oui"], selected="Non", inline=True),
-                                    style="margin-bottom: 1rem;"
-                                ),
-
                                 ui.panel_conditional(
-                                    "input.daily_modifs_oui === 'Oui'",
+                                    "input._daily_is_running === 'true'",
                                     ui.div(
-                                        ui.tags.label("Quelles modifications ?", style="font-weight: 600; margin-bottom: 0.5rem; display: block;"),
-                                        ui.input_text("daily_modifs_details", "", placeholder="Décrivez les modifications"),
-                                        style="padding-left: 1.5rem; border-left: 3px solid #D92323; margin-top: 1rem;"
-                                    )
+                                        ui.tags.label("Avez-vous modifié l'entraînement ?", style="font-weight: 600; margin-bottom: 0.5rem; display: block;"),
+                                        ui.input_radio_buttons("daily_modifs_oui", "", choices=["Non", "Oui"], selected="Non", inline=True),
+                                        style="margin-bottom: 1rem;"
+                                    ),
+
+                                    ui.panel_conditional(
+                                        "input.daily_modifs_oui === 'Oui'",
+                                        ui.div(
+                                            ui.tags.label("Quelles modifications ?", style="font-weight: 600; margin-bottom: 0.5rem; display: block;"),
+                                            ui.input_text("daily_modifs_details", "", placeholder="Décrivez les modifications"),
+                                            style="padding-left: 1.5rem; border-left: 3px solid #D92323; margin-top: 1rem;"
+                                        )
+                                    ),
                                 ),
 
                                 style="margin-bottom: 1.5rem; padding: 1.25rem; background: #f9f9f9; border-radius: 8px;"
@@ -3668,6 +3666,8 @@ def server(input, output, session):
     meta_df = reactive.Value(pd.DataFrame())         # meta filtrées sur période + athlète (+ toggle vrun)
     act_label_to_id = reactive.Value({})             # libellé -> activity_id (pour Run/TrailRun)
     id_to_info = reactive.Value({})                  # activity_id -> infos (type, date_str)
+    quest_label_to_id = reactive.Value({})           # libellé -> activity_id (ALL types, for questionnaire)
+    quest_id_to_info = reactive.Value({})            # activity_id -> infos (type, date_str) (ALL types)
 
     # Data date range (for restricting date pickers)
     data_min_date = reactive.Value(None)  # Earliest date with data
@@ -3806,6 +3806,72 @@ def server(input, output, session):
         id_to_info.set(info_map)
         ui.update_select("activity_sel", choices=list(labels_map.keys()),
                          selected=(next(iter(labels_map)) if labels_map else None))
+
+        # --- Build ALL-type activity list for questionnaire ---
+        all_type_labels = {
+            "run": "Course ext\u00e9rieur",
+            "trailrun": "Course en sentier",
+            "virtualrun": "Course sur tapis",
+            "treadmill": "Course sur tapis",
+            "ride": "V\u00e9lo",
+            "virtualride": "V\u00e9lo int\u00e9rieur",
+            "swim": "Natation",
+            "walk": "Marche",
+            "hike": "Randonn\u00e9e",
+            "weighttraining": "Musculation",
+            "yoga": "Yoga",
+            "crossfit": "CrossFit",
+            "elliptical": "Elliptique",
+            "rowing": "Rameur",
+            "mountainbikeride": "V\u00e9lo de montagne",
+            "nordicski": "Ski de fond",
+            "snowboard": "Planche \u00e0 neige",
+            "iceskate": "Patin \u00e0 glace",
+            "rockclimbing": "Escalade",
+        }
+        q_labels_map, q_info_map = {}, {}
+        if not df.empty and "type" in df.columns:
+            dfq = df.copy()
+            if "start_time" in dfq.columns and not dfq.empty:
+                dfq = dfq.sort_values("start_time", ascending=False)
+                dfq["date_str"] = pd.to_datetime(dfq["start_time"]).dt.date.astype(str)
+
+                mois_fr_q = ["janvier", "f\u00e9vrier", "mars", "avril", "mai", "juin",
+                             "juillet", "ao\u00fbt", "septembre", "octobre", "novembre", "d\u00e9cembre"]
+                dates_q = pd.to_datetime(dfq["start_time"])
+                dfq["jour"] = dates_q.dt.day
+                dfq["mois_nom"] = dates_q.dt.month.apply(lambda m: mois_fr_q[m - 1])
+                dfq["annee"] = dates_q.dt.year
+
+                duration_min_q = dfq["duration_min"].fillna(0)
+                total_seconds_q = (duration_min_q * 60).astype(int)
+                hours_q = total_seconds_q // 3600
+                minutes_q = (total_seconds_q % 3600) // 60
+                seconds_q = total_seconds_q % 60
+                dfq["time_str"] = np.where(
+                    hours_q > 0,
+                    hours_q.astype(str) + ":" + minutes_q.astype(str).str.zfill(2) + ":" + seconds_q.astype(str).str.zfill(2),
+                    minutes_q.astype(str) + ":" + seconds_q.astype(str).str.zfill(2)
+                )
+                dfq["dist_str"] = dfq["distance_km"].fillna(0).apply(lambda x: f"{x:.2f}")
+                dfq["type_fr"] = dfq["type"].str.lower().map(all_type_labels).fillna(dfq["type"])
+
+                dfq["label"] = (
+                    dfq["type_fr"] + " - " +
+                    dfq["jour"].astype(str) + " " + dfq["mois_nom"] + " " + dfq["annee"].astype(str) + " - " +
+                    dfq["time_str"] + " - " +
+                    dfq["dist_str"] + " km"
+                )
+
+                q_labels_map = dict(zip(dfq["label"], dfq["activity_id"].astype(str)))
+                q_info_map = dict(
+                    zip(
+                        dfq["activity_id"].astype(str),
+                        [{"type": str(t), "date_str": d} for t, d in zip(dfq["type"], dfq["date_str"])]
+                    )
+                )
+        quest_label_to_id.set(q_labels_map)
+        quest_id_to_info.set(q_info_map)
 
     # Rechargement des métadonnées quand athlète/période/toggle changent
     @reactive.Effect
@@ -7677,8 +7743,9 @@ def server(input, output, session):
                     style="color: #666; font-style: italic;")
             )
 
-        # Use the same activity list as "Analyse de séance" (act_label_to_id)
-        labels_map = act_label_to_id.get()
+        # Use ALL activity types for questionnaire (not just running)
+        labels_map = quest_label_to_id.get()
+        q_info = quest_id_to_info.get() or {}
 
         if not labels_map:
             return ui.div(
@@ -7706,11 +7773,12 @@ def server(input, output, session):
         except Exception as e:
             print(f"Warning: Could not check filled surveys: {e}")
 
-        # Build choices excluding already filled activities
+        # Build choices: exclude already filled + enforce date cutoff
         choices = {
             activity_id: label
             for label, activity_id in labels_map.items()
             if str(activity_id) not in filled_activity_ids
+            and q_info.get(str(activity_id), {}).get("date_str", "") >= QUESTIONNAIRE_CUTOFF_DATE
         }
 
         if not choices:
@@ -7726,6 +7794,23 @@ def server(input, output, session):
             choices=choices,
             width="100%"
         )
+
+    # DAILY QUESTIONNAIRE: Update hidden _daily_is_running based on selected activity type
+    @reactive.Effect
+    @reactive.event(input.daily_selected_activity)
+    def _update_daily_activity_type():
+        """Update hidden input with activity type for conditional panel display."""
+        try:
+            activity_id = input.daily_selected_activity()
+            if not activity_id:
+                ui.update_text("_daily_is_running", value="true")
+                return
+            info = (quest_id_to_info.get() or {}).get(str(activity_id), {})
+            act_type = str(info.get("type", "")).lower()
+            is_run = "true" if act_type in RUN_TYPES else "false"
+            ui.update_text("_daily_is_running", value=is_run)
+        except Exception:
+            ui.update_text("_daily_is_running", value="true")
 
     # DAILY QUESTIONNAIRE: Already Filled Check
     @output
@@ -7818,8 +7903,8 @@ def server(input, output, session):
         days_since_monday = today.weekday()  # Monday = 0, Sunday = 6
         current_monday = today - timedelta(days=days_since_monday)
 
-        # Minimum date (data starts August 17, 2024)
-        min_date = date(2024, 8, 17)
+        # Minimum date (questionnaire access starts Feb 23, 2026)
+        min_date = date(2026, 2, 23)
         # Find Monday of the week containing min_date
         days_to_monday = min_date.weekday()
         min_monday = min_date - timedelta(days=days_to_monday)
@@ -7957,27 +8042,27 @@ def server(input, output, session):
             date_seance = activity_df.iloc[0]["date"]
             duree_min = int(activity_df.iloc[0]["duration_sec"] / 60) if activity_df.iloc[0]["duration_sec"] else None
 
-            # Collect form data
-            douleur_oui = input.daily_douleur_oui() == "Oui"
-            modifs_oui = input.daily_modifs_oui() == "Oui"
+            # Detect activity type for conditional fields
+            _quest_info = quest_id_to_info.get() or {}
+            _act_info = _quest_info.get(str(activity_id), {})
+            _act_type = str(_act_info.get("type", "")).lower()
+            is_running = _act_type in RUN_TYPES
+
+            # Collect form data (non-running: skip hidden fields)
+            if is_running:
+                douleur_oui = input.daily_douleur_oui() == "Oui"
+                modifs_oui = input.daily_modifs_oui() == "Oui"
+            else:
+                douleur_oui = False
+                modifs_oui = False
 
             # Parse pain selections from body picker (JSON string from JS)
             pain_selections = {}
-            if douleur_oui:
+            if is_running and douleur_oui:
                 try:
                     pain_json = input.daily_pain_selections()
                     if pain_json and str(pain_json).strip():
                         pain_selections = json.loads(str(pain_json))
-                except Exception:
-                    pass
-
-            # Parse capacite_execution
-            capacite_val = None
-            if douleur_oui:
-                try:
-                    cap_raw = input.daily_capacite_execution()
-                    if cap_raw is not None and str(cap_raw).strip():
-                        capacite_val = int(cap_raw)
                 except Exception:
                     pass
 
@@ -7987,25 +8072,25 @@ def server(input, output, session):
                 "date_seance": date_seance,
                 "duree_min": duree_min,
 
-                # S2: RPE and goal achievement
+                # S2: RPE (always) + goal achievement (running only)
                 "rpe_cr10": int(input.daily_rpe_cr10()),
-                "atteinte_obj": int(input.daily_atteinte_obj()),
+                "atteinte_obj": int(input.daily_atteinte_obj()) if is_running else None,
 
-                # S3: Pain/discomfort
+                # S3: Pain/discomfort (running only)
                 "douleur_oui": douleur_oui,
                 "douleur_intensite": None,
                 "douleur_type_zone": None,
-                "douleur_impact": input.daily_douleur_impact() == "Oui" if douleur_oui else None,
-                "capacite_execution": capacite_val,
+                "douleur_impact": None,
+                "capacite_execution": None,
 
-                # S4: Context
-                "en_groupe": input.daily_en_groupe() == "Oui",
+                # S4: Context (running only)
+                "en_groupe": input.daily_en_groupe() == "Oui" if is_running else False,
 
                 # S5: Details
-                "allures": input.daily_allures() if input.daily_allures() else None,
+                "allures": (input.daily_allures() if input.daily_allures() else None) if is_running else None,
                 "commentaires": input.daily_commentaires() if input.daily_commentaires() else None,
                 "modifs_oui": modifs_oui,
-                "modifs_details": input.daily_modifs_details() if modifs_oui and input.daily_modifs_details() else None
+                "modifs_details": (input.daily_modifs_details() if modifs_oui and input.daily_modifs_details() else None) if is_running else None
             }
 
             # Insert into database - use return=representation to get back the UUID
