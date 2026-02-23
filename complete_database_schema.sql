@@ -787,6 +787,8 @@ CREATE TABLE IF NOT EXISTS lactate_tests (
     race_time_seconds DECIMAL(10,2),
     -- Speed in m/s (only for speed_tests, auto-calculated from distance/time)
     speed_ms DECIMAL(6,3),
+    -- Race category: indoor (intérieur) or outdoor (extérieur), only for races
+    race_category TEXT,
     -- Injury fields (only for injuries)
     injury_location TEXT,  -- Body part ID: 'left_knee', 'right_calf', etc.
     injury_severity INTEGER CHECK (injury_severity IS NULL OR (injury_severity >= 1 AND injury_severity <= 3)),
@@ -808,7 +810,10 @@ CREATE TABLE IF NOT EXISTS lactate_tests (
     CONSTRAINT chk_injury_severity_required CHECK (test_type != 'injury' OR injury_severity IS NOT NULL),
     CONSTRAINT chk_injury_status_required CHECK (test_type != 'injury' OR injury_status IS NOT NULL),
     -- Injury fields only for injuries
-    CONSTRAINT chk_injury_fields_only_for_injuries CHECK (test_type = 'injury' OR (injury_location IS NULL AND injury_severity IS NULL AND injury_status IS NULL))
+    CONSTRAINT chk_injury_fields_only_for_injuries CHECK (test_type = 'injury' OR (injury_location IS NULL AND injury_severity IS NULL AND injury_status IS NULL)),
+    -- Race category validation
+    CONSTRAINT chk_race_category_values CHECK (race_category IS NULL OR race_category IN ('indoor', 'outdoor')),
+    CONSTRAINT chk_race_category_only_for_races CHECK (test_type = 'race' OR race_category IS NULL)
 );
 
 CREATE INDEX idx_lactate_athlete_date ON lactate_tests(athlete_id, test_date DESC);
@@ -835,6 +840,7 @@ COMMENT ON COLUMN lactate_tests.speed_ms IS 'Speed in m/s, auto-calculated from 
 COMMENT ON COLUMN lactate_tests.injury_location IS 'Body part ID: head, neck, left_knee, right_calf, etc. (only for injuries).';
 COMMENT ON COLUMN lactate_tests.injury_severity IS 'Pain level 1-3: 1=légère, 2=modérée, 3=sévère (only for injuries).';
 COMMENT ON COLUMN lactate_tests.injury_status IS 'Status: active, recovering, resolved (only for injuries).';
+COMMENT ON COLUMN lactate_tests.race_category IS 'Race venue: indoor (intérieur) or outdoor (extérieur). Only for races.';
 
 -- Body part reference for injury_location:
 -- Upper: head, neck, left_shoulder, right_shoulder, left_arm, right_arm, chest

@@ -1565,13 +1565,14 @@ login_modal = ui.modal(
         ui.tags.script("""
             $(document).ready(function() {
                 $('#login_password').on('keypress', function(e) {
-                    if (e.which === 13) {  // Enter key
+                    if (e.which === 13) {
                         e.preventDefault();
                         var password = $(this).val();
                         if (password && password.length > 0) {
+                            Shiny.setInputValue('login_password', password);
                             setTimeout(function() {
                                 $('#login_submit').click();
-                            }, 50);
+                            }, 100);
                         }
                     }
                 });
@@ -2142,6 +2143,28 @@ app_ui = ui.page_fluid(
         .summary-grid-full { grid-template-columns: 1fr; }
         h2 { font-size: 1.8rem; }
 
+        /* === MOBILE TOP BAR: hide Période and Options, keep Athlète === */
+        .top-bar-container .col-6,
+        .top-bar-container .col-sm-6,
+        .top-bar-container .col-2,
+        .top-bar-container .col-sm-2 {
+          display: none !important;
+        }
+        .top-bar-container .col-4,
+        .top-bar-container .col-sm-4 {
+          grid-column: span 12 !important;
+          width: 100% !important;
+          max-width: 100% !important;
+          flex: 0 0 100% !important;
+        }
+        /* Fallback: hide 2nd and 3rd children of layout_columns */
+        .top-bar-container .bslib-grid > :nth-child(2),
+        .top-bar-container .bslib-grid > :nth-child(3),
+        .top-bar-container > .row > :nth-child(2),
+        .top-bar-container > .row > :nth-child(3) {
+          display: none !important;
+        }
+
         /* === MOBILE TAB RESTRICTION === */
         /* Hide desktop-only tab buttons */
         #tabs .nav-tabs .nav-item:has([data-value="Résumé de période"]),
@@ -2163,6 +2186,128 @@ app_ui = ui.page_fluid(
         .tab-pane[data-value="Comparaison de séances"] {
           display: none !important;
         }
+
+        /* === MOBILE QUESTIONNAIRE PILLS: ensure tappable === */
+        #questionnaire_tabs .nav-pills,
+        .tab-pane[data-value="Questionnaires"] .nav-pills {
+          display: flex !important;
+          flex-wrap: nowrap !important;
+          gap: 0.5rem;
+          margin-bottom: 1rem;
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
+        }
+        #questionnaire_tabs .nav-pills .nav-item,
+        .tab-pane[data-value="Questionnaires"] .nav-pills .nav-item {
+          flex-shrink: 0;
+        }
+        #questionnaire_tabs .nav-pills .nav-link,
+        .tab-pane[data-value="Questionnaires"] .nav-pills .nav-link {
+          padding: 0.75rem 1.25rem !important;
+          font-size: 1rem !important;
+          white-space: nowrap;
+          min-height: 48px;
+          display: flex;
+          align-items: center;
+          cursor: pointer;
+          -webkit-tap-highlight-color: rgba(0,0,0,0.1);
+          touch-action: manipulation;
+          position: relative;
+          z-index: 10;
+        }
+
+        /* === MOBILE QUESTIONNAIRE: stack everything vertically === */
+        .survey-form .bslib-gap-spacing {
+          grid-template-columns: 1fr !important;
+        }
+        .survey-form .bslib-gap-spacing > * {
+          grid-column: auto !important;
+        }
+        .survey-form {
+          padding: 1rem !important;
+        }
+        .survey-form > div {
+          padding: 0.75rem !important;
+        }
+        .responsive-3col .bslib-gap-spacing {
+          grid-template-columns: 1fr !important;
+        }
+        .daily-sel-item .ostrc-q select {
+          font-size: 1rem !important;
+          padding: 0.5rem !important;
+          min-height: 44px;
+        }
+        .daily-sel-item .ostrc-q label {
+          min-width: auto !important;
+          font-size: 0.95rem;
+        }
+        .daily-sel-item .ostrc-q {
+          flex-direction: column !important;
+          gap: 0.25rem !important;
+        }
+        .survey-form input[type="number"] {
+          width: 100% !important;
+        }
+
+        /* Hide sRPE graph on mobile */
+        .srpe-card {
+          display: none !important;
+        }
+
+        /* === MOBILE HEADER: stacked centered layout === */
+        .dashboard-header {
+          padding: 0.5rem 0 !important;
+        }
+        .dashboard-header .bslib-gap-spacing {
+          grid-template-columns: 1fr !important;
+          gap: 0.25rem !important;
+        }
+        .dashboard-header .bslib-gap-spacing > * {
+          grid-column: auto !important;
+        }
+        .dashboard-header h2 {
+          font-size: 1.4rem !important;
+          text-align: center;
+        }
+        .dashboard-header .user-info-container {
+          justify-content: center !important;
+          text-align: center !important;
+          flex-wrap: wrap;
+          gap: 0.4rem !important;
+        }
+        /* User info (Coach / athlete name) on its own full-width line */
+        .dashboard-header .user-info-container > #user_info_display {
+          width: 100%;
+          order: -1;
+        }
+        .dashboard-header .user-info-container > #user_info_display .btn {
+          border: none !important;
+          background: transparent !important;
+          font-size: 1rem !important;
+          padding: 0 !important;
+          width: 100%;
+        }
+        .dashboard-header .user-info-container .btn {
+          font-size: 0.9rem !important;
+          padding: 0.4rem 1rem !important;
+        }
+
+        /* Compact athlete selector on mobile */
+        .top-bar-container {
+          padding: 0.5rem !important;
+          margin-bottom: 0.25rem !important;
+        }
+
+        /* Remove spacing before tabs */
+        br {
+          display: none;
+        }
+
+        /* Compact tab labels on mobile */
+        .nav-tabs .nav-link {
+          font-size: 0.9rem !important;
+          padding: 0.5rem 0.75rem !important;
+        }
       }
 
       /* BRUMS/REST-Q responsive: 3 cols on tablet+, 2 cols on mobile */
@@ -2176,7 +2321,7 @@ app_ui = ui.page_fluid(
       }
       @media (max-width: 768px) {
         .responsive-3col .bslib-gap-spacing {
-          grid-template-columns: 1fr 1fr !important;
+          grid-template-columns: 1fr !important;
         }
       }
 
@@ -2451,7 +2596,7 @@ app_ui = ui.page_fluid(
             // === MOBILE TAB RESTRICTION ===
             (function() {
                 var MOBILE_BREAKPOINT = 768;
-                var ALLOWED_TABS = ['Questionnaires', 'Entrée de données manuelle'];
+                var ALLOWED_TABS = ['Questionnaires', 'Entrée de données manuelle', 'Suivi questionnaire'];
                 var DEFAULT_TAB = 'Questionnaires';
 
                 function isMobile() {
@@ -2488,9 +2633,12 @@ app_ui = ui.page_fluid(
                     mobileTimer = setTimeout(enforce, 250);
                 });
 
-                // Block navigation to hidden tabs
+                // Block navigation to hidden MAIN tabs only (not sub-tabs like questionnaire pills)
                 $(document).on('show.bs.tab', function(e) {
                     if (!isMobile()) return;
+                    // Only restrict main #tabs navigation, not sub-navs
+                    var mainNav = document.querySelector('#tabs > .nav-tabs');
+                    if (!mainNav || !mainNav.contains(e.target)) return;
                     var target = e.target.getAttribute('data-value');
                     if (ALLOWED_TABS.indexOf(target) === -1) {
                         e.preventDefault();
@@ -2540,13 +2688,14 @@ def scale_with_tooltip(label_text, input_element, tooltip_text=""):
 def dashboard_content_ui():
     return ui.div(
         ui.div(
+            {"class": "dashboard-header"},
             ui.layout_columns(
                 ui.h2("Dashboard - Saint-Laurent Sélect", style="margin: 0;"),
                 ui.div(
                     ui.output_ui("user_info_display"),
-                    ui.input_action_button("refresh_data_btn", "Sync", class_="btn btn-primary", style="font-weight: 600; font-size: 1rem; padding: 0.4rem 0.8rem;"),
+                    ui.input_action_button("refresh_data_btn", "Synchroniser", class_="btn btn-light", style="font-weight: 600; font-size: 1rem; padding: 0.4rem 0.8rem; border: 1px solid #d1d5db; outline: none; box-shadow: none;"),
                     ui.output_ui("refresh_status_display"),
-                    ui.input_action_button("logout_btn", "Logout", class_="btn btn-light", style="font-weight: 600; font-size: 1rem; padding: 0.4rem 0.8rem; border: 1px solid #d1d5db; outline: none; box-shadow: none;"),
+                    ui.input_action_button("logout_btn", "Se d\u00e9connecter", class_="btn btn-light", style="font-weight: 600; font-size: 1rem; padding: 0.4rem 0.8rem; border: 1px solid #d1d5db; outline: none; box-shadow: none;"),
                     class_="user-info-container",
                     style="text-align: right; justify-content: flex-end; gap: 0.5rem; display: flex; align-items: center;"
                 ),
@@ -2592,6 +2741,21 @@ def dashboard_content_ui():
                         ),
                         col_widths=[4, 4, 4],
                     ),
+                    # Race marker controls - applies to both CTL/ATL and Zones graphs
+                    ui.div(
+                        ui.tags.label("Marqueur de course", style="font-weight: 600; color: #374151; margin-top: 1rem; margin-bottom: 0.5rem; display: block;"),
+                        ui.div(
+                            ui.output_ui("race_selector_dropdown"),
+                            ui.input_checkbox(
+                                "show_simulated_race",
+                                "Simuler une date alternative",
+                                value=False
+                            ),
+                            ui.output_ui("simulated_race_date_input"),
+                            style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;"
+                        ),
+                        style="margin-top: 0.5rem; padding: 0.75rem; background: #fef3c7; border-radius: 8px; border: 1px solid #f59e0b;"
+                    ),
                     ui.div(ui.output_ui("run_duration_trend"), style="margin-top: 1rem;"),
                     # Zone time longitudinal graph - same section, shares CTL/ATL controls
                     ui.div(
@@ -2623,21 +2787,6 @@ def dashboard_content_ui():
                             style="margin-top: 0.5rem; display: flex; align-items: center; gap: 1.5rem;"
                         ),
                         style="margin-top: 1rem;"
-                    ),
-                    # Race marker controls
-                    ui.div(
-                        ui.tags.label("Marqueur de course", style="font-weight: 600; color: #374151; margin-top: 1.5rem; margin-bottom: 0.5rem; display: block;"),
-                        ui.div(
-                            ui.output_ui("race_selector_dropdown"),
-                            ui.input_checkbox(
-                                "show_simulated_race",
-                                "Simuler une date alternative",
-                                value=False
-                            ),
-                            ui.output_ui("simulated_race_date_input"),
-                            style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;"
-                        ),
-                        style="margin-top: 0.5rem; padding: 0.75rem; background: #fef3c7; border-radius: 8px; border: 1px solid #f59e0b;"
                     ),
                     ui.output_ui("zone_change_banner"),
                     ui.div(ui.output_ui("zone_time_longitudinal"), style="margin-top: 1rem;"),
@@ -2835,9 +2984,17 @@ def dashboard_content_ui():
                                 style="margin-bottom: 2rem; padding: 1.25rem; background: #fef2f2; border-radius: 8px; border-left: 4px solid #D92323;"
                             ),
 
-                            # Hidden input for activity type detection (controls conditional panels)
+                            # Hidden inputs for conditional panels
                             ui.input_text("_daily_is_running", "", value="true"),
-                            ui.tags.script("document.getElementById('_daily_is_running').parentElement.style.display='none';"),
+                            ui.input_text("_daily_has_activity", "", value="false"),
+                            ui.tags.script("""
+                                document.getElementById('_daily_is_running').parentElement.style.display='none';
+                                document.getElementById('_daily_has_activity').parentElement.style.display='none';
+                            """),
+
+                            # Everything below only shows when an activity is selected
+                            ui.panel_conditional(
+                                "input._daily_has_activity === 'true'",
 
                             # S2: Effort perçu (always visible) + atteinte des objectifs (running-only)
                             ui.div(
@@ -3138,6 +3295,8 @@ def dashboard_content_ui():
                                 ui.output_ui("daily_survey_result"),
                                 style="margin-top: 2rem;"
                             )
+
+                            ),  # end panel_conditional _daily_has_activity
                         )
                     )
                 ),
@@ -3158,6 +3317,14 @@ def dashboard_content_ui():
                                 ui.output_ui("weekly_already_filled_notice"),
                                 style="margin-bottom: 2rem; padding: 1.25rem; background: #fef2f2; border-radius: 8px; border-left: 4px solid #D92323;"
                             ),
+
+                            # Hidden input for conditional display
+                            ui.input_text("_weekly_has_week", "", value="false"),
+                            ui.tags.script("document.getElementById('_weekly_has_week').parentElement.style.display='none';"),
+
+                            # Everything below only shows when a week is selected
+                            ui.panel_conditional(
+                                "input._weekly_has_week === 'true'",
 
                             # S1: Bien-être
                             ui.div(
@@ -3328,6 +3495,8 @@ def dashboard_content_ui():
                                 ui.output_ui("weekly_survey_result"),
                                 style="margin-top: 2rem;"
                             )
+
+                            ),  # end panel_conditional _weekly_has_week
                         )
                     )
                 ),
@@ -3336,6 +3505,7 @@ def dashboard_content_ui():
             ),
             # sRPE (Subjective Charge) graph
             ui.card(
+                {"class": "srpe-card"},
                 ui.card_header("Charge subjective (sRPE)"),
                 ui.output_ui("srpe_graph"),
                 style="margin-top: 1rem;"
@@ -3346,7 +3516,12 @@ def dashboard_content_ui():
         ui.nav_panel("Entrée de données manuelle",
             ui.output_ui("manual_entry_content")
         ),
-        
+
+        # Suivi tab: Questionnaire completion tracking
+        ui.nav_panel("Suivi questionnaire",
+            ui.output_ui("suivi_content")
+        ),
+
         # Phase 1.5: Intervals visualization - REMOVED (to be implemented later)
         id="tabs"
     )
@@ -3941,6 +4116,22 @@ def server(input, output, session):
         TSB = Training Stress Balance (CTL - ATL)
         """
         print("[RUN_TREND] Starting run_duration_trend render...", flush=True)
+
+        # Read race inputs early to establish reactive dependencies
+        # (must be outside try/except to ensure Shiny tracks them)
+        try:
+            _race_id_val = input.selected_race()
+        except Exception:
+            _race_id_val = None
+        try:
+            _show_sim_val = input.show_simulated_race()
+        except Exception:
+            _show_sim_val = False
+        try:
+            _sim_date_val = input.simulated_race_date()
+        except Exception:
+            _sim_date_val = None
+
         df_all = meta_df_all.get().copy()
         print(f"[RUN_TREND] meta_df_all has {len(df_all)} rows", flush=True)
 
@@ -4021,7 +4212,7 @@ def server(input, output, session):
         if not display_mask.any():
             return plotly_to_html(_create_empty_plotly_fig("Aucune donnée dans la plage sélectionnée", height=360))
 
-        idx = ctl.index[display_mask].to_pydatetime()  # Convert to Python datetime for Plotly
+        idx = [d.strftime('%Y-%m-%d') for d in ctl.index[display_mask]]  # String dates for consistent Plotly rendering
         ctl_vals = ctl.loc[display_mask]
         atl_vals = atl.loc[display_mask]
         tsb_vals = tsb.loc[display_mask]
@@ -4106,60 +4297,50 @@ def server(input, output, session):
             margin=dict(l=70, r=30, t=70, b=70)
         )
 
-        # Add race markers (vertical lines) - same as zone_time_longitudinal
-        try:
-            # Safely get selected_race - might not exist if dropdown wasn't rendered
+        # Add race markers as shapes with yref='paper' (spans full height reliably)
+        if _race_id_val and _race_id_val != "":
             try:
-                selected_race_id = input.selected_race()
-            except Exception:
-                selected_race_id = None
-            if selected_race_id and selected_race_id != "":
-                race = get_race_by_id(int(selected_race_id))
+                race = get_race_by_id(int(_race_id_val))
                 if race:
                     race_date = race.get('test_date')
-                    race_date_str = str(race_date) if race_date else None
                     distance_m = race.get('distance_m', 0)
 
-                    if race_date_str:
+                    if race_date:
+                        race_date_str = str(race_date)
                         if distance_m >= 1000:
                             dist_display = f"{distance_m / 1000:.1f}km"
                         else:
                             dist_display = f"{distance_m}m"
 
-                        fig.add_vline(
-                            x=race_date_str,
-                            line_dash="solid",
-                            line_color="#F59E0B",
-                            line_width=2.5,
-                            annotation_text=f"Course: {dist_display}",
-                            annotation_position="top right",
-                            annotation_font_size=10,
-                            annotation_font_color="#F59E0B"
+                        fig.add_shape(
+                            type="line", x0=race_date_str, x1=race_date_str,
+                            y0=0, y1=1, yref="paper",
+                            line=dict(color="#F59E0B", width=2.5, dash="solid"),
+                            layer="above"
+                        )
+                        fig.add_annotation(
+                            x=race_date_str, y=1, yref="paper",
+                            text=f"Course: {dist_display}",
+                            showarrow=False, font=dict(size=10, color="#F59E0B"),
+                            xanchor="left", yanchor="bottom"
                         )
 
-                        try:
-                            show_sim = input.show_simulated_race()
-                        except Exception:
-                            show_sim = False
-                        if show_sim:
-                            try:
-                                sim_date = input.simulated_race_date()
-                            except Exception:
-                                sim_date = None
-                            if sim_date:
-                                sim_date_str = sim_date.strftime('%Y-%m-%d') if hasattr(sim_date, 'strftime') else str(sim_date)
-                                fig.add_vline(
-                                    x=sim_date_str,
-                                    line_dash="dash",
-                                    line_color="#8B5CF6",
-                                    line_width=2,
-                                    annotation_text=f"Simulation: {dist_display}",
-                                    annotation_position="top left",
-                                    annotation_font_size=10,
-                                    annotation_font_color="#8B5CF6"
-                                )
-        except Exception as e:
-            print(f"Error adding race markers to trend graph: {e}")
+                        if _show_sim_val and _sim_date_val:
+                            sim_date_str = _sim_date_val.strftime('%Y-%m-%d') if hasattr(_sim_date_val, 'strftime') else str(_sim_date_val)
+                            fig.add_shape(
+                                type="line", x0=sim_date_str, x1=sim_date_str,
+                                y0=0, y1=1, yref="paper",
+                                line=dict(color="#8B5CF6", width=2, dash="dash"),
+                                layer="above"
+                            )
+                            fig.add_annotation(
+                                x=sim_date_str, y=1, yref="paper",
+                                text=f"Simulation: {dist_display}",
+                                showarrow=False, font=dict(size=10, color="#8B5CF6"),
+                                xanchor="right", yanchor="bottom"
+                            )
+            except Exception as e:
+                print(f"Error adding race markers to trend graph: {e}")
 
         return plotly_to_html(fig)
 
@@ -4681,7 +4862,7 @@ def server(input, output, session):
     # Race selector dropdown for "Résumé de période"
     @render.ui
     def race_selector_dropdown():
-        """Render race selector dropdown based on current athlete."""
+        """Render race selector dropdown based on current athlete and date range."""
         print("[DEBUG] race_selector_dropdown called", flush=True)
         try:
             role = user_role.get()
@@ -4695,29 +4876,45 @@ def server(input, output, session):
                 athlete_id = user_athlete_id.get()
 
             if not athlete_id:
-                return ui.p("Sélectionnez un athlète", style="color: #666; font-style: italic; margin: 0;")
+                return ui.p("S\u00e9lectionnez un athl\u00e8te", style="color: #666; font-style: italic; margin: 0;")
+
+            # Get date range from period inputs
+            try:
+                start_date = str(input.date_start())
+                end_date = str(input.date_end())
+            except Exception:
+                start_date = None
+                end_date = None
 
             races = get_athlete_races(athlete_id)
 
+            # Filter races by selected date range
+            if races and start_date and end_date:
+                races = [r for r in races if start_date <= str(r.get("test_date", "")) <= end_date]
+
             if not races:
-                return ui.p("Aucune course enregistrée", style="color: #666; font-style: italic; margin: 0;")
+                return ui.p("Aucune course pour cette p\u00e9riode", style="color: #666; font-style: italic; margin: 0;")
         except Exception as e:
             print(f"Error in race_selector_dropdown: {e}")
             return ui.p("Erreur de chargement", style="color: #666; font-style: italic; margin: 0;")
 
         # Build choices dict
-        choices = {"": "-- Sélectionner une course --"}
+        choices = {"": "-- S\u00e9lectionner une course --"}
         for race in races:
             race_id = str(race.get("id", ""))
             test_date = race.get("test_date", "")
             distance_m = race.get("distance_m", 0)
             race_time = race.get("race_time_seconds")
 
-            # Format label: "2025-03-15 - 10000m (42:30)"
+            # Format label: "2025-03-15 - 10000m (42:30) Int."
+            race_cat = race.get("race_category", "")
+            cat_suffix = " Int." if race_cat == "indoor" else " Ext." if race_cat == "outdoor" else ""
             label = f"{test_date} - {distance_m}m"
             if race_time:
                 time_str = format_time_from_seconds(race_time)
                 label += f" ({time_str})"
+            if cat_suffix:
+                label += cat_suffix
 
             choices[race_id] = label
 
@@ -4731,7 +4928,7 @@ def server(input, output, session):
     # Simulated race date input (shown only when checkbox is checked)
     @render.ui
     def simulated_race_date_input():
-        """Render date input for race simulation."""
+        """Render date input for race simulation, constrained to period date range."""
         try:
             show_sim = input.show_simulated_race()
         except Exception:
@@ -4739,10 +4936,25 @@ def server(input, output, session):
         if not show_sim:
             return ui.div()  # Hidden when checkbox unchecked
 
+        # Constrain to the selected period date range
+        try:
+            min_date = str(input.date_start())
+        except Exception:
+            min_date = None
+        try:
+            max_date = str(input.date_end())
+        except Exception:
+            max_date = None
+
+        # Default value: end of period (or today if unavailable)
+        default_val = max_date if max_date else str(datetime.now().date())
+
         return ui.input_date(
             "simulated_race_date",
-            "Date simulée:",
-            value=str(datetime.now().date()),
+            "Date simul\u00e9e:",
+            value=default_val,
+            min=min_date,
+            max=max_date,
             width="150px"
         )
 
@@ -4797,6 +5009,21 @@ def server(input, output, session):
     def zone_time_longitudinal():
         """Render longitudinal zone time chart with multi-zone support and merge/distinct modes."""
         print("[ZONE_LONG] Starting zone_time_longitudinal render...", flush=True)
+
+        # Read race inputs early to establish reactive dependencies
+        try:
+            _race_id_val = input.selected_race()
+        except Exception:
+            _race_id_val = None
+        try:
+            _show_sim_val = input.show_simulated_race()
+        except Exception:
+            _show_sim_val = False
+        try:
+            _sim_date_val = input.simulated_race_date()
+        except Exception:
+            _sim_date_val = None
+
         zones = zone_time_available_zones.get()
         print(f"[ZONE_LONG] Got zones: {len(zones) if zones else 0}", flush=True)
         if not zones:
@@ -5098,63 +5325,50 @@ def server(input, output, session):
                 annotation_font_color="#6b7280"
             )
 
-        # Add race markers (vertical lines)
-        try:
-            # Safely get selected_race - might not exist if dropdown wasn't rendered
+        # Add race markers as shapes with yref='paper' (spans full height reliably)
+        if _race_id_val and _race_id_val != "":
             try:
-                selected_race_id = input.selected_race()
-            except Exception:
-                selected_race_id = None
-            if selected_race_id and selected_race_id != "":
-                race = get_race_by_id(int(selected_race_id))
+                race = get_race_by_id(int(_race_id_val))
                 if race:
-                    # Real race marker (gold/amber color)
                     race_date = race.get('test_date')
-                    race_date_str = str(race_date) if race_date else None
                     distance_m = race.get('distance_m', 0)
 
-                    if race_date_str:
-                        # Format distance for display
+                    if race_date:
+                        race_date_str = str(race_date)
                         if distance_m >= 1000:
                             dist_display = f"{distance_m / 1000:.1f}km"
                         else:
                             dist_display = f"{distance_m}m"
 
-                        fig.add_vline(
-                            x=race_date_str,
-                            line_dash="solid",
-                            line_color="#F59E0B",
-                            line_width=2.5,
-                            annotation_text=f"Course: {dist_display}",
-                            annotation_position="top right",
-                            annotation_font_size=10,
-                            annotation_font_color="#F59E0B"
+                        fig.add_shape(
+                            type="line", x0=race_date_str, x1=race_date_str,
+                            y0=0, y1=1, yref="paper",
+                            line=dict(color="#F59E0B", width=2.5, dash="solid"),
+                            layer="above"
+                        )
+                        fig.add_annotation(
+                            x=race_date_str, y=1, yref="paper",
+                            text=f"Course: {dist_display}",
+                            showarrow=False, font=dict(size=10, color="#F59E0B"),
+                            xanchor="left", yanchor="bottom"
                         )
 
-                        # Simulated race marker (if enabled)
-                        try:
-                            show_sim = input.show_simulated_race()
-                        except Exception:
-                            show_sim = False
-                        if show_sim:
-                            try:
-                                sim_date = input.simulated_race_date()
-                            except Exception:
-                                sim_date = None
-                            if sim_date:
-                                sim_date_str = sim_date.strftime('%Y-%m-%d') if hasattr(sim_date, 'strftime') else str(sim_date)
-                                fig.add_vline(
-                                    x=sim_date_str,
-                                    line_dash="dash",
-                                    line_color="#8B5CF6",
-                                    line_width=2,
-                                    annotation_text=f"Simulation: {dist_display}",
-                                    annotation_position="top left",
-                                    annotation_font_size=10,
-                                    annotation_font_color="#8B5CF6"
-                                )
-        except Exception as e:
-            print(f"Error adding race markers: {e}")
+                        if _show_sim_val and _sim_date_val:
+                            sim_date_str = _sim_date_val.strftime('%Y-%m-%d') if hasattr(_sim_date_val, 'strftime') else str(_sim_date_val)
+                            fig.add_shape(
+                                type="line", x0=sim_date_str, x1=sim_date_str,
+                                y0=0, y1=1, yref="paper",
+                                line=dict(color="#8B5CF6", width=2, dash="dash"),
+                                layer="above"
+                            )
+                            fig.add_annotation(
+                                x=sim_date_str, y=1, yref="paper",
+                                text=f"Simulation: {dist_display}",
+                                showarrow=False, font=dict(size=10, color="#8B5CF6"),
+                                xanchor="right", yanchor="bottom"
+                            )
+            except Exception as e:
+                print(f"Error adding race markers: {e}")
 
         # Build layout configuration
         layout_config = dict(
@@ -7734,13 +7948,15 @@ def server(input, output, session):
         if role == "coach":
             return ui.div(
                 ui.tags.p("Les questionnaires sont reserves aux athletes.",
-                    style="color: #666; font-style: italic;")
+                    style="color: #666; font-style: italic;"),
+                ui.tags.script("Shiny.setInputValue('_daily_has_activity', 'false');")
             )
 
         if not athlete_id:
             return ui.div(
                 ui.tags.p("Veuillez vous connecter pour voir vos entrainements.",
-                    style="color: #666; font-style: italic;")
+                    style="color: #666; font-style: italic;"),
+                ui.tags.script("Shiny.setInputValue('_daily_has_activity', 'false');")
             )
 
         # Use ALL activity types for questionnaire (not just running)
@@ -7751,6 +7967,7 @@ def server(input, output, session):
             return ui.div(
                 ui.tags.p("Aucun entrainement dans la periode selectionnee. Ajustez les dates ci-dessus.",
                     style="color: #666; font-style: italic;"),
+                ui.tags.script("Shiny.setInputValue('_daily_has_activity', 'false');"),
                 style="padding: 1rem; background: #fff3cd; border-radius: 4px;"
             )
 
@@ -7785,32 +8002,45 @@ def server(input, output, session):
             return ui.div(
                 ui.tags.p("Tous les questionnaires de la periode ont ete remplis!",
                     style="color: #16a34a; font-style: italic;"),
+                ui.tags.script("Shiny.setInputValue('_daily_has_activity', 'false');"),
                 style="padding: 1rem; background: #f0fdf4; border-radius: 4px; border: 1px solid #16a34a;"
             )
 
-        return ui.input_select(
-            "daily_selected_activity",
-            "Choisir l'entrainement:",
-            choices=choices,
-            width="100%"
+        # Add placeholder as first option
+        choices_with_placeholder = {"": "-- Choisir un entra\u00eenement --"}
+        choices_with_placeholder.update(choices)
+
+        return ui.div(
+            ui.input_select(
+                "daily_selected_activity",
+                "Choisir l'entrainement:",
+                choices=choices_with_placeholder,
+                selected="",
+                width="100%"
+            ),
+            # Start hidden, reactive effect will set to true when user picks
+            ui.tags.script("Shiny.setInputValue('_daily_has_activity', 'false');")
         )
 
-    # DAILY QUESTIONNAIRE: Update hidden _daily_is_running based on selected activity type
+    # DAILY QUESTIONNAIRE: Update hidden _daily_is_running and _daily_has_activity
     @reactive.Effect
     @reactive.event(input.daily_selected_activity)
     def _update_daily_activity_type():
-        """Update hidden input with activity type for conditional panel display."""
+        """Update hidden inputs for conditional panel display."""
         try:
             activity_id = input.daily_selected_activity()
             if not activity_id:
                 ui.update_text("_daily_is_running", value="true")
+                ui.update_text("_daily_has_activity", value="false")
                 return
+            ui.update_text("_daily_has_activity", value="true")
             info = (quest_id_to_info.get() or {}).get(str(activity_id), {})
             act_type = str(info.get("type", "")).lower()
             is_run = "true" if act_type in RUN_TYPES else "false"
             ui.update_text("_daily_is_running", value=is_run)
         except Exception:
             ui.update_text("_daily_is_running", value="true")
+            ui.update_text("_daily_has_activity", value="false")
 
     # DAILY QUESTIONNAIRE: Already Filled Check
     @output
@@ -7916,22 +8146,39 @@ def server(input, output, session):
             weeks.append(monday)
             monday = monday - timedelta(weeks=1)
 
-        # Build choices
-        choices = {}
+        if not weeks:
+            return ui.div(
+                ui.tags.p("Aucune semaine disponible pour le moment.",
+                    style="color: #666; font-style: italic;"),
+                ui.tags.script("Shiny.setInputValue('_weekly_has_week', 'false');")
+            )
+
+        # Build choices with placeholder
+        choices = {"": "-- Choisir une semaine --"}
+        mois_fr = ["janvier", "février", "mars", "avril", "mai", "juin",
+                   "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
         for monday in weeks:
-            # Format: "Semaine du 14 novembre 2025"
-            mois_fr = ["janvier", "février", "mars", "avril", "mai", "juin",
-                       "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
             label = f"Semaine du {monday.day} {mois_fr[monday.month - 1]} {monday.year}"
             choices[monday.isoformat()] = label
 
-        return ui.input_select(
-            "weekly_selected_week",
-            "Choisir la semaine (lundi):",
-            choices=choices,
-            selected=current_monday.isoformat(),
-            width="100%"
+        return ui.div(
+            ui.input_select(
+                "weekly_selected_week",
+                "Choisir la semaine (lundi):",
+                choices=choices,
+                selected="",
+                width="100%"
+            ),
+            # Start hidden, reactive effect will set to true when user picks a week
+            ui.tags.script("Shiny.setInputValue('_weekly_has_week', 'false');")
         )
+
+    # WEEKLY QUESTIONNAIRE: Toggle form visibility when week is selected
+    @reactive.Effect
+    @reactive.event(input.weekly_selected_week)
+    def _update_weekly_has_week():
+        week_val = input.weekly_selected_week()
+        ui.update_text("_weekly_has_week", value="true" if week_val else "false")
 
     # WEEKLY QUESTIONNAIRE: Already Filled Check
     @output
@@ -8824,6 +9071,327 @@ def server(input, output, session):
 
         return ui.div(*cards)
 
+    # ========== SUIVI TAB: Questionnaire Completion Tracking ==========
+
+    _FR_MOIS = ["janvier", "février", "mars", "avril", "mai", "juin",
+                "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
+
+    @output
+    @render.ui
+    def suivi_content():
+        """Main Suivi tab content with date picker, athlete selector, and detail table."""
+        if not is_authenticated.get():
+            return ui.div()
+
+        from datetime import date as d, timedelta
+        role = user_role.get()
+        controls = []
+
+        # Date range picker (independent of top bar)
+        cutoff = d.fromisoformat(QUESTIONNAIRE_CUTOFF_DATE)
+        today_dt = d.today()
+        default_start = cutoff
+
+        controls.append(
+            ui.div(
+                ui.tags.h5("Période", style="color: #D92323; margin-bottom: 0.5rem;"),
+                ui.layout_columns(
+                    ui.input_date("suivi_date_start", "Du", value=default_start, min=cutoff, width="100%"),
+                    ui.input_date("suivi_date_end", "Au", value=today_dt, min=cutoff, width="100%"),
+                    col_widths=[6, 6]
+                ),
+                style="margin-bottom: 1.5rem; padding: 1rem; background: #fef2f2; border-radius: 8px; border-left: 4px solid #D92323;"
+            )
+        )
+
+        # Coach: multi-select athletes
+        if role == "coach":
+            athlete_choices = {"__all__": "Tous les athlètes"}
+            for _, row in athletes_df.iterrows():
+                athlete_choices[row["athlete_id"]] = row["name"]
+            controls.append(
+                ui.div(
+                    ui.input_selectize(
+                        "suivi_athletes",
+                        "Athlètes",
+                        choices=athlete_choices,
+                        selected=["__all__"],
+                        multiple=True,
+                        width="100%"
+                    ),
+                    style="margin-bottom: 1.5rem;"
+                )
+            )
+
+        return ui.card(
+            ui.card_header("Suivi des questionnaires", style="background: #D92323; color: white; font-weight: 600;"),
+            ui.div(
+                *controls,
+                ui.output_ui("suivi_table"),
+                style="padding: 1.5rem;"
+            )
+        )
+
+    @output
+    @render.ui
+    def suivi_table():
+        """Build detailed questionnaire completion table with per-item done/not-done."""
+        if not is_authenticated.get():
+            return ui.div()
+
+        role = user_role.get()
+        from datetime import date as date_cls, timedelta
+
+        # Determine target athlete IDs
+        if role == "athlete":
+            target_ids = [user_athlete_id.get()]
+        else:
+            try:
+                selected = list(input.suivi_athletes())
+            except Exception:
+                selected = ["__all__"]
+            if "__all__" in selected or not selected:
+                target_ids = athletes_df["athlete_id"].tolist()
+            else:
+                target_ids = [s for s in selected if s != "__all__"]
+
+        if not target_ids:
+            return ui.div(
+                ui.tags.p("Aucun athlète sélectionné.", style="color: #666; font-style: italic;")
+            )
+
+        # Date range from suivi-specific pickers
+        cutoff = date_cls.fromisoformat(QUESTIONNAIRE_CUTOFF_DATE)
+        today_dt = date_cls.today()
+
+        try:
+            period_start = max(cutoff, input.suivi_date_start())
+        except Exception:
+            period_start = cutoff
+        try:
+            period_end = max(cutoff, input.suivi_date_end())
+        except Exception:
+            period_end = today_dt
+
+        if period_start > period_end:
+            return ui.div(
+                ui.tags.p("La date de d\u00e9but doit \u00eatre avant la date de fin.",
+                    style="color: #dc2626; font-style: italic;")
+            )
+
+        ids_csv = ",".join(str(a) for a in target_ids)
+
+        # --- DAILY: fetch activities + filled surveys ---
+        try:
+            act_df = supa_select(
+                "activity_metadata",
+                select="activity_id,athlete_id,type,date",
+                params={
+                    "athlete_id": f"in.({ids_csv})",
+                    "date": f"gte.{period_start.isoformat()}",
+                    "and": f"(date.lte.{period_end.isoformat()})"
+                },
+                order="date.desc",
+                limit=50000
+            )
+        except Exception:
+            act_df = pd.DataFrame()
+
+        filled_daily = set()
+        try:
+            ds_df = supa_select(
+                "daily_workout_surveys",
+                select="activity_id",
+                params={
+                    "athlete_id": f"in.({ids_csv})",
+                    "date_seance": f"gte.{period_start.isoformat()}",
+                    "and": f"(date_seance.lte.{period_end.isoformat()})"
+                },
+                limit=50000
+            )
+            if not ds_df.empty:
+                filled_daily = set(ds_df["activity_id"].astype(str).tolist())
+        except Exception:
+            pass
+
+        # --- WEEKLY: weeks in range + filled surveys ---
+        first_monday = period_start - timedelta(days=period_start.weekday())
+
+        weeks_in_range = []
+        monday = first_monday
+        while monday <= period_end:
+            weeks_in_range.append(monday)
+            monday += timedelta(weeks=1)
+
+        filled_weekly = {}  # athlete_id -> set of week_start_date strings
+        try:
+            ws_df = supa_select(
+                "weekly_wellness_surveys",
+                select="athlete_id,week_start_date",
+                params={
+                    "athlete_id": f"in.({ids_csv})",
+                    "week_start_date": f"gte.{first_monday.isoformat()}",
+                    "and": f"(week_start_date.lte.{period_end.isoformat()})"
+                },
+                limit=10000
+            )
+            if not ws_df.empty:
+                for _, row in ws_df.iterrows():
+                    aid = str(row["athlete_id"])
+                    wsd = str(row["week_start_date"])[:10]
+                    filled_weekly.setdefault(aid, set()).add(wsd)
+        except Exception:
+            pass
+
+        # Activity type labels
+        type_labels = {
+            "run": "Course", "trailrun": "Trail", "virtualrun": "Tapis",
+            "ride": "Vélo", "virtualride": "Vélo int.", "swim": "Natation",
+            "weighttraining": "Musculation", "yoga": "Yoga", "walk": "Marche",
+            "hike": "Randonnée", "crossfit": "Cross-training", "workout": "Cross-training",
+            "elliptical": "Elliptique", "rowing": "Rameur",
+        }
+
+        # Done / not done icons
+        DONE = '<span style="color: #059669; font-weight: 700; font-size: 1.1rem;">&#10003;</span>'
+        NOT_DONE = '<span style="color: #dc2626; font-weight: 700; font-size: 1.1rem;">&#10007;</span>'
+
+        # --- BUILD HTML per athlete ---
+        sections_html = []
+        sorted_ids = sorted(target_ids, key=lambda a: id_to_name.get(str(a), ""))
+
+        for aid in sorted_ids:
+            aid_str = str(aid)
+            name = id_to_name.get(aid_str, aid_str)
+
+            # --- Daily activities for this athlete ---
+            daily_rows = []
+            if not act_df.empty:
+                athlete_acts = act_df[act_df["athlete_id"].astype(str) == aid_str].sort_values("date", ascending=False)
+                for _, act in athlete_acts.iterrows():
+                    act_id = str(act["activity_id"])
+                    act_date = str(act["date"])[:10]
+                    act_type = str(act.get("type", "")).lower()
+                    type_label = type_labels.get(act_type, act_type.capitalize() if act_type else "Activité")
+                    is_filled = act_id in filled_daily
+                    icon = DONE if is_filled else NOT_DONE
+                    row_bg = "#d1fae5" if is_filled else "#fef2f2"
+                    daily_rows.append(
+                        f'<tr style="background: {row_bg};">'
+                        f'<td style="padding: 6px 10px;">{act_date}</td>'
+                        f'<td style="padding: 6px 10px;">{type_label}</td>'
+                        f'<td style="padding: 6px 10px; text-align: center;">{icon}</td>'
+                        f'</tr>'
+                    )
+
+            daily_total = len(daily_rows)
+            daily_filled = sum(1 for r in daily_rows if "#d1fae5" in r)
+
+            if daily_rows:
+                daily_summary = f"{daily_filled}/{daily_total}"
+                if daily_filled == daily_total:
+                    sum_style = "color: #059669; font-weight: 600;"
+                elif daily_filled >= daily_total * 0.5:
+                    sum_style = "color: #d97706; font-weight: 600;"
+                else:
+                    sum_style = "color: #dc2626; font-weight: 600;"
+                daily_html = f"""
+                <div style="margin-bottom: 0.5rem;">
+                    <div style="font-weight: 600; margin-bottom: 0.25rem;">Quotidien <span style="{sum_style}">({daily_summary})</span></div>
+                    <table style="width: 100%; border-collapse: collapse; font-size: 0.9rem;">
+                        <tr style="background: #f3f4f6;"><th style="padding: 4px 10px; text-align: left;">Date</th><th style="padding: 4px 10px; text-align: left;">Type</th><th style="padding: 4px 10px; text-align: center;">Statut</th></tr>
+                        {''.join(daily_rows)}
+                    </table>
+                </div>"""
+            else:
+                daily_html = '<div style="margin-bottom: 0.5rem;"><span style="color: #9ca3af; font-style: italic;">Aucune activité dans la période</span></div>'
+
+            # --- Weekly for this athlete ---
+            weekly_rows = []
+            athlete_filled_weeks = filled_weekly.get(aid_str, set())
+            for w_monday in weeks_in_range:
+                w_str = w_monday.isoformat()
+                label = f"Semaine du {w_monday.day} {_FR_MOIS[w_monday.month - 1]}"
+                is_filled = w_str in athlete_filled_weeks
+                icon = DONE if is_filled else NOT_DONE
+                row_bg = "#d1fae5" if is_filled else "#fef2f2"
+                weekly_rows.append(
+                    f'<tr style="background: {row_bg};">'
+                    f'<td style="padding: 6px 10px;">{label}</td>'
+                    f'<td style="padding: 6px 10px; text-align: center;">{icon}</td>'
+                    f'</tr>'
+                )
+
+            weekly_total = len(weekly_rows)
+            weekly_filled_count = sum(1 for w in weeks_in_range if w.isoformat() in athlete_filled_weeks)
+
+            if weekly_rows:
+                weekly_summary = f"{weekly_filled_count}/{weekly_total}"
+                if weekly_filled_count == weekly_total:
+                    wsum_style = "color: #059669; font-weight: 600;"
+                elif weekly_filled_count >= weekly_total * 0.5:
+                    wsum_style = "color: #d97706; font-weight: 600;"
+                else:
+                    wsum_style = "color: #dc2626; font-weight: 600;"
+                weekly_html = f"""
+                <div>
+                    <div style="font-weight: 600; margin-bottom: 0.25rem;">Hebdomadaire <span style="{wsum_style}">({weekly_summary})</span></div>
+                    <table style="width: 100%; border-collapse: collapse; font-size: 0.9rem;">
+                        <tr style="background: #f3f4f6;"><th style="padding: 4px 10px; text-align: left;">Semaine</th><th style="padding: 4px 10px; text-align: center;">Statut</th></tr>
+                        {''.join(weekly_rows)}
+                    </table>
+                </div>"""
+            else:
+                weekly_html = '<div><span style="color: #9ca3af; font-style: italic;">Aucune semaine dans la période</span></div>'
+
+            # Summary badges for header
+            badges = []
+            if daily_rows:
+                badges.append(f'<span style="font-size: 0.85rem; {sum_style} margin-left: 0.75rem;">Quotidien {daily_summary}</span>')
+            if weekly_rows:
+                badges.append(f'<span style="font-size: 0.85rem; {wsum_style} margin-left: 0.75rem;">Hebdomadaire {weekly_summary}</span>')
+            badge_html = ''.join(badges)
+
+            # Athlete section — collapsible
+            sections_html.append(f"""
+            <div class="suivi-athlete-section" style="border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 1rem; overflow: hidden;">
+                <div class="suivi-athlete-header" style="background: #f9fafb; padding: 10px 14px; font-weight: 600; font-size: 1.05rem; border-bottom: 1px solid #e5e7eb; cursor: pointer; display: flex; align-items: center; user-select: none;"
+                     onclick="this.parentElement.classList.toggle('suivi-expanded'); var arrow = this.querySelector('.suivi-arrow'); arrow.textContent = this.parentElement.classList.contains('suivi-expanded') ? '\u25BC' : '\u25B6';">
+                    <span class="suivi-arrow" style="margin-right: 8px; font-size: 0.8rem; color: #6b7280; transition: transform 0.2s;">\u25B6</span>
+                    <span>{name}</span>
+                    {badge_html}
+                </div>
+                <div class="suivi-athlete-body" style="padding: 12px 14px; display: none;">
+                    {daily_html}
+                    {weekly_html}
+                </div>
+            </div>
+            """)
+
+        # CSS + JS for expand/collapse
+        toggle_code = """
+        <style>
+            .suivi-athlete-section.suivi-expanded .suivi-athlete-body { display: block !important; }
+            .suivi-athlete-header:hover { background: #f3f4f6 !important; }
+        </style>
+        """
+
+        # Expand All / Collapse All buttons
+        toolbar = """
+        <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
+            <button onclick="document.querySelectorAll('.suivi-athlete-section').forEach(function(s){ s.classList.add('suivi-expanded'); s.querySelector('.suivi-arrow').textContent='\u25BC'; });"
+                    style="padding: 6px 14px; border: 1px solid #d1d5db; border-radius: 6px; background: #fff; cursor: pointer; font-size: 0.85rem; color: #374151;">
+                \u25BC Tout d\u00e9plier
+            </button>
+            <button onclick="document.querySelectorAll('.suivi-athlete-section').forEach(function(s){ s.classList.remove('suivi-expanded'); s.querySelector('.suivi-arrow').textContent='\u25B6'; });"
+                    style="padding: 6px 14px; border: 1px solid #d1d5db; border-radius: 6px; background: #fff; cursor: pointer; font-size: 0.85rem; color: #374151;">
+                \u25B6 Tout r\u00e9duire
+            </button>
+        </div>
+        """
+
+        return ui.HTML(toggle_code + toolbar + ''.join(sections_html))
+
     def personal_records_card():
         """Build Personal Records card for athletes"""
         # Load current PRs
@@ -8999,7 +9567,9 @@ def server(input, output, session):
 
             # Format type display and color based on type
             if test_type == "race":
-                type_display = "Course"
+                race_cat = test.get("race_category", "")
+                cat_labels = {"indoor": " Int.", "outdoor": " Ext."}
+                type_display = "Course" + cat_labels.get(race_cat, "")
                 type_color = "#F59E0B"  # Gold/Orange
             elif test_type == "injury":
                 # Color based on severity for injuries
@@ -9563,17 +10133,29 @@ def server(input, output, session):
         test_type = input.lactate_test_type() if hasattr(input, 'lactate_test_type') else "lactate"
 
         if test_type == "race":
-            # Show distance and race time inputs for races
-            return ui.row(
-                ui.column(6,
-                    ui.tags.label("Distance (mètres)", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
-                    ui.input_numeric("lactate_distance_m", "", value=None, min=100, max=50000, step=100, width="100%")
+            # Show distance, race time, and category inputs for races
+            return ui.div(
+                ui.row(
+                    ui.column(6,
+                        ui.tags.label("Distance (mètres)", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
+                        ui.input_numeric("lactate_distance_m", "", value=None, min=100, max=50000, step=100, width="100%")
+                    ),
+                    ui.column(6,
+                        ui.tags.label("Temps de course (HH:MM:SS ou MM:SS)", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
+                        ui.input_text("lactate_race_time", "", placeholder="ex: 42:30 ou 1:23:45", width="100%")
+                    ),
+                    style="margin-top: 1rem;"
                 ),
-                ui.column(6,
-                    ui.tags.label("Temps de course (HH:MM:SS ou MM:SS)", style="font-weight: 600; display: block; margin-bottom: 0.5rem;"),
-                    ui.input_text("lactate_race_time", "", placeholder="ex: 42:30 ou 1:23:45", width="100%")
-                ),
-                style="margin-top: 1rem;"
+                ui.div(
+                    ui.input_radio_buttons(
+                        "race_category",
+                        "Catégorie",
+                        choices={"indoor": "Intérieur", "outdoor": "Extérieur"},
+                        selected="indoor",
+                        inline=True
+                    ),
+                    style="margin-top: 0.75rem;"
+                )
             )
         elif test_type == "speed_test":
             # Show distance, time, and auto-calculated speed for speed tests
@@ -9735,11 +10317,17 @@ def server(input, output, session):
                 record["distance_m"] = int(distance_m)
                 record["lactate_mmol"] = None
                 record["race_time_seconds"] = race_time_seconds
+                race_category = input.race_category() if hasattr(input, 'race_category') else None
+                record["race_category"] = race_category if race_category else None
+                cat_labels = {"indoor": "Int\u00e9rieur", "outdoor": "Ext\u00e9rieur"}
+                cat_display = cat_labels.get(race_category, "")
                 if race_time_seconds:
                     time_display = format_time_from_seconds(race_time_seconds)
                     success_msg = f"Course du {test_date}: {distance_m}m en {time_display}"
                 else:
                     success_msg = f"Course du {test_date}: {distance_m}m"
+                if cat_display:
+                    success_msg += f" ({cat_display})"
 
             elif test_type == "speed_test":
                 # Speed test - require distance and time

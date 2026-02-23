@@ -2,7 +2,7 @@
 
 **Project:** Intervals.icu → Supabase Data Ingestion System
 **Team:** Saint-Laurent Sélect Running Club
-**Last Updated:** February 16, 2026 (QUESTIONNAIRE UX + SMART ROUNDING + OSTRC)
+**Last Updated:** February 22, 2026 (MOBILE UX + RACE MARKERS + SUIVI TAB + DATA ENTRY)
 **Status:** ✅ **FULLY AUTOMATED** - Dashboard + Daily Lambda Cron Running
 
 ---
@@ -254,7 +254,232 @@ All previous troubleshooting around database issues was a red herring - the root
 
 ---
 
-### Current Session (Feb 16, 2026) - QUESTIONNAIRE UX + SMART ROUNDING + OSTRC
+### Current Session (Feb 22, 2026) - MOBILE UX, RACE MARKERS, SUIVI TAB, DATA ENTRY
+
+**Session Summary:**
+1. Deployed "Suivi questionnaire" tab (built in prior session) — coach monitoring view
+2. Fixed suivi tab date validation bug (cutoff date interaction)
+3. Fixed fast login race condition (password debounce bypass)
+4. Added collapsible/expandable athlete sections in suivi tab
+5. Mobile questionnaire UX overhaul — stack everything vertically on mobile
+6. Mobile header redesign — centered title, user info on own line, matching button styles
+7. Renamed buttons to French (Sync → Synchroniser, Logout → Se déconnecter)
+8. Hidden sRPE graph on mobile
+9. Race marker controls moved above CTL/ATL graph, applies to both graphs
+10. Race dropdown filtered by selected date range
+11. Simulated date picker constrained to period date range
+12. Fixed race marker vertical lines (reactive dependency + add_shape approach)
+13. Added race categories (indoor/outdoor) to Events card and database
+14. Batch imported 40 races for 14 athletes (34 earlier + 6 this session)
+15. Created Sofia Veilleux athlete record (placeholder, no Intervals.icu ID yet)
+
+---
+
+**Feature 1: Suivi Questionnaire Tab — Date Fixes**
+
+Fixed date validation bug where the tab showed "La date de début doit être avant la date de fin" even with valid dates. Root cause: `QUESTIONNAIRE_CUTOFF_DATE` (Feb 23) clamped `period_start` to Feb 23 while `period_end` was Feb 22 (today).
+
+**Fix:** Added `min=cutoff` to both date pickers so users can't select dates before Feb 23. Server-side uses `max(cutoff, ...)` for both start and end.
+
+---
+
+**Feature 2: Fast Login Fix**
+
+**Problem:** Typing password quickly and pressing Enter showed "Veuillez entrer votre mot de passe" as if empty.
+
+**Root Cause:** Shiny's text input debounce hadn't flushed the value to the server.
+
+**Fix:** Added `Shiny.setInputValue('login_password', password)` in the JS keypress handler to force-flush before triggering button click. Increased timeout from 50ms to 100ms.
+
+---
+
+**Feature 3: Collapsible Athlete Sections in Suivi Tab**
+
+Each athlete section in the coach monitoring view is now collapsible with click-to-toggle arrows (▶/▼). Summary badges visible when collapsed. Toolbar with "Tout déplier" / "Tout réduire" buttons.
+
+**Implementation:** CSS class toggling (`suivi-expanded`) with `display: block !important` override.
+
+---
+
+**Feature 4: Mobile Questionnaire UX Overhaul**
+
+Added CSS rules inside `@media (max-width: 768px)` to fix cramped questionnaire layouts:
+
+| Section | Before | After |
+|---------|--------|-------|
+| Weekly S1/S4/S5 sliders | 2 side-by-side (col_widths=[6,6]) | Stacked vertically |
+| BRUMS/REST-Q | 2 columns | 1 column |
+| Daily form padding | 2rem | 1rem |
+| OSTRC dropdowns | Tiny (0.3rem padding) | Larger (0.5rem, 44px min-height) |
+| Poids input | Fixed 150px | Full width |
+
+**CSS Rules:** `.survey-form .bslib-gap-spacing { grid-template-columns: 1fr !important; }` forces single column. `.responsive-3col` rule changed from `1fr 1fr` to `1fr`.
+
+---
+
+**Feature 5: Mobile Header Redesign**
+
+- Title centered on mobile
+- User info (Coach/athlete name) on its own centered line via `#user_info_display { width: 100%; order: -1; }`
+- Synchroniser and Se déconnecter buttons side-by-side below, both `btn btn-light` style
+- sRPE card hidden on mobile: `.srpe-card { display: none !important; }`
+
+---
+
+**Feature 6: Race Marker Improvements**
+
+Three changes to the "Marqueur de course" system:
+
+1. **Moved above CTL/ATL graph** — now between metric controls and graph, applies to both CTL/ATL and Zones graphs simultaneously
+2. **Filtered by date range** — dropdown only shows races within the selected period. Shows "Aucune course pour cette période" when none exist
+3. **Simulated date constrained** — date picker has `min`/`max` matching the period date range, defaults to period end date
+
+**Race markers rendering fix:** Changed from `fig.add_vline()` to `fig.add_shape(type="line", yref="paper", layer="above")` + `fig.add_annotation()`. Also read `input.selected_race()` at top of both graph functions to establish reactive dependencies (was inside try/except which prevented Shiny from tracking).
+
+---
+
+**Feature 7: Race Categories (Indoor/Outdoor)**
+
+Added `race_category` column to `lactate_tests` table for indoor/outdoor classification.
+
+**Database Migration:** `migrations/add_race_category.sql`
+```sql
+ALTER TABLE lactate_tests ADD COLUMN race_category TEXT CHECK (race_category IN ('indoor', 'outdoor'));
+```
+
+**UI Changes:** Radio buttons in Events card race form: "Intérieur" / "Extérieur". Category shown in results table and race selector dropdown as "Int." / "Ext." suffix.
+
+---
+
+**Feature 8: Batch Race Import + New Athlete**
+
+Imported 40 total races for 14 athletes via Supabase REST API. All races have `race_category` (indoor/outdoor).
+
+Created **Sofia Veilleux** as new athlete (`athlete_id: sofiaveilleux`, no Intervals.icu ID — placeholder for future setup).
+
+**Athletes with races:** Alex Larochelle, Alexandrine Coursol, Sophie Courville, Kevin A. Robertson, Nazim Berrichi, Robin Lefebvre, Yassine Aber, Evans Stephen, Zakary Mama-Yari, Myriam Poirier, Jade Essabar, Renaud Bordeleau, Matthew Beaudet, Emma Veilleux, Sofia Veilleux, Elie Nayrand.
+
+---
+
+**Files Modified:**
+
+| File | Changes |
+|------|---------|
+| `supabase_shiny.py` | All features: mobile CSS, header redesign, login fix, race markers, race categories, button renaming (+882 lines) |
+| `complete_database_schema.sql` | Added `race_category` column to lactate_tests |
+| `migrations/add_race_category.sql` | NEW — Add race_category column |
+
+**Deployed:** Dashboard live on production (multiple deployments during session)
+- ShinyApps.io: https://insquebec-sportsciences.shinyapps.io/saintlaurentselect_dashboard/
+
+---
+
+### Previous Session (Feb 20, 2026) - QUESTIONNAIRE ENHANCEMENTS + ALL ACTIVITY TYPES
+
+**Session Summary:**
+1. Removed redundant `capacite_execution` and `douleur_impact` fields (covered by OSTRC Q1/Q3)
+2. Added red triangle tooltips with accented French definitions for all 4 OSTRC questions
+3. Date cutoff Feb 23, 2026 for both daily and weekly questionnaires
+4. All activity types (not just running) now available in daily questionnaire
+5. Non-running activities show simplified form (RPE + commentaires only)
+6. Database migration: `atteinte_obj` made nullable for non-running activities
+
+---
+
+**Feature 1: Removed Redundant Fields**
+
+Removed `capacite_execution` (0-3 radio buttons) and `douleur_impact` (Yes/No radio) from the daily questionnaire pain section. These are now fully covered by OSTRC Q1 (Participation) and Q3 (Performance) added in Phase 3J.
+
+**Changes:**
+- Deleted both UI blocks from the form (radio buttons for capacite_execution and douleur_impact)
+- Both fields now always set to `None` in submission handler
+- Database columns kept for backward compatibility (existing data preserved)
+
+---
+
+**Feature 2: OSTRC Tooltips (Red Triangles)**
+
+Added `<span class="tooltip-trigger" data-tooltip="...">` to each OSTRC question label in the JavaScript `render()` function. Uses existing tooltip CSS/JS infrastructure (event delegation on `document`).
+
+**Tooltip Definitions (accented French):**
+- **Participation:** 0 = Participation complete / 1 = Problemes mineurs / 2 = Problemes majeurs / 3 = Incapable de participer
+- **Volume:** 0 = Aucune reduction / 1 = Legere reduction / 2 = Reduction moderee / 3 = Reduction majeure / 4 = Incapable de s'entrainer
+- **Performance:** 0 = Aucun impact / 1 = Impact leger / 2 = Impact modere / 3 = Impact majeur / 4 = Incapable de performer
+- **Douleur:** 0 = Aucune douleur / 1 = Douleur legere / 2 = Douleur moderee / 3 = Douleur severe
+
+**Technical Note:** Used Unicode escape sequences (`\u00e8` for e, `\u00e9` for e, etc.) in Python triple-quoted strings inside `ui.tags.script()` to ensure proper rendering through the Python→JS→HTML chain.
+
+---
+
+**Feature 3: Date Cutoff (Feb 23, 2026)**
+
+Athletes can only fill questionnaires for activities/weeks from Feb 23, 2026 onward.
+
+**Changes:**
+- Added `QUESTIONNAIRE_CUTOFF_DATE = "2026-02-23"` constant near `RUN_TYPES` (~line 83)
+- **Daily:** `daily_activity_selector()` filters out activities with date < cutoff via `quest_id_to_info` date comparison
+- **Weekly:** `weekly_week_selector()` changed `min_date` from `date(2024, 8, 17)` to `date(2026, 2, 23)`
+
+---
+
+**Feature 4: All Activity Types in Daily Questionnaire**
+
+Non-running activities (cross-training, weight lifting, swimming, cycling, etc.) now appear in the daily questionnaire dropdown. Non-running activities show a simplified form (RPE + commentaires only).
+
+**New Reactive Values:**
+- `quest_label_to_id` — label→activity_id mapping for ALL activity types
+- `quest_id_to_info` — activity_id→{type, date_str} for ALL types
+
+**Activity Type Labels (French):**
+`all_type_labels` dict includes: Run, TrailRun, VirtualRun, Ride/VirtualRide (Velo), Swim (Natation), WeightTraining (Musculation), Workout/CrossFit (Cross-training), Yoga, Hike (Randonnee), Walk (Marche), Rowing (Aviron), Ski/NordicSki (Ski), Other (Autre)
+
+**Populated in `_update_activity_choices()`:** Second block processes full unfiltered DataFrame (not just running). Keeps existing running-only `act_label_to_id`/`id_to_info` unchanged for the analysis tab.
+
+**Hidden Input Pattern:**
+- Added `ui.input_text("_daily_is_running", "", value="true")` hidden via JS `display:none`
+- `@reactive.Effect` on `input.daily_selected_activity` reads activity type from `quest_id_to_info`, updates hidden input to `"true"` or `"false"`
+- `panel_conditional("input._daily_is_running === 'true'")` wraps running-specific UI sections
+
+**Conditional Form Sections:**
+
+| Always Visible (all activities) | Running-Only (hidden for non-running) |
+|---|---|
+| RPE CR10 slider | Atteinte des objectifs slider |
+| Commentaires text area | S3: Douleur/Inconfort (entire section) |
+| Submit button | S4: Contexte (en_groupe) |
+| | Allures, Modifications |
+
+**Submission Handler:**
+- Detects activity type via `quest_id_to_info` and `RUN_TYPES` set
+- Non-running activities: `atteinte_obj=None`, `douleur_oui=False`, `en_groupe=False`, `allures=None`, `modifs_oui=False`, pain entries skipped
+- Running activities: full form as before (minus removed fields)
+
+---
+
+**Feature 5: Database Migration**
+
+**File:** `migrations/questionnaire_enhancements.sql`
+```sql
+ALTER TABLE daily_workout_surveys ALTER COLUMN atteinte_obj DROP NOT NULL;
+```
+**Status:** Executed in Supabase SQL Editor on Feb 20, 2026.
+
+---
+
+**Files Modified:**
+
+| File | Changes |
+|------|---------|
+| `supabase_shiny.py` | All 4 features: removed fields, OSTRC tooltips, date cutoff, all activity types with conditional form (+172/-87 lines) |
+| `migrations/questionnaire_enhancements.sql` | NEW — Make atteinte_obj nullable |
+
+**Deployed:** Dashboard live on production (commit `2a382ff`)
+- GitHub: Pushed to `main`
+- ShinyApps.io: https://insquebec-sportsciences.shinyapps.io/saintlaurentselect_dashboard/
+
+---
+
+### Previous Session (Feb 16, 2026) - QUESTIONNAIRE UX + SMART ROUNDING + OSTRC
 
 **Session Summary:**
 1. Weekly questionnaire full width (removed `max-width: 1200px`)
@@ -1374,7 +1599,7 @@ Claude Code is connected to Marc's Notion workspace via MCP. This enables readin
 
 | Table | Purpose |
 |-------|---------|
-| `daily_workout_surveys` | Post-workout RPE, satisfaction, goals, capacite_execution (0-3) |
+| `daily_workout_surveys` | Post-workout RPE, goals, notes — supports all activity types (non-running stores NULLs for running-specific fields) |
 | `weekly_wellness_surveys` | BRUMS, REST-Q, OSLO metrics |
 | `workout_pain_entries` | OSTRC-H2 pain data from body picker (one row per body part per survey, 4 OSTRC questions + score) |
 
@@ -2296,6 +2521,61 @@ When athletes link Strava instead of watch, Strava strips Stryd biomechanics dat
   - Injury handler: `handle_save_lactate_test()` function (~line 8977)
 - **Deployed:** Live on production
 
+### Phase 3L: Mobile UX + Race Markers + Suivi Tab + Data Entry (Feb 22, 2026) ✅
+- **Suivi Questionnaire Tab Fixes:**
+  - Fixed date validation bug (cutoff date clamping issue)
+  - Added `min=cutoff` to date pickers, server-side `max(cutoff, ...)` clamping
+  - Collapsible athlete sections with expand/collapse arrows and toolbar buttons
+- **Fast Login Fix:**
+  - Added `Shiny.setInputValue('login_password', password)` to force-flush before Enter
+  - Increased setTimeout from 50ms to 100ms
+- **Mobile Questionnaire UX:**
+  - `.survey-form .bslib-gap-spacing { grid-template-columns: 1fr !important; }` forces single column
+  - BRUMS/REST-Q changed from `1fr 1fr` to `1fr` at <768px
+  - OSTRC dropdowns enlarged (44px min-height), form padding reduced
+- **Mobile Header Redesign:**
+  - Title centered, user info on own line (`#user_info_display { width: 100%; order: -1; }`)
+  - Synchroniser button changed from `btn-primary` to `btn-light` (matches Se déconnecter)
+  - sRPE card hidden on mobile (`.srpe-card { display: none !important; }`)
+- **Button Renaming:** Sync → Synchroniser, Logout → Se déconnecter
+- **Race Marker Improvements:**
+  - Moved controls above CTL/ATL graph (applies to both graphs)
+  - Dropdown filtered by selected date range ("Aucune course pour cette période" when empty)
+  - Simulated date constrained to period range with `min`/`max`
+  - Fixed rendering: `add_shape(yref="paper", layer="above")` + `add_annotation()` replaces `add_vline()`
+  - Read `input.selected_race()` at top of graph functions for reactive dependency
+- **Race Categories (Indoor/Outdoor):**
+  - Added `race_category` column to `lactate_tests` (CHECK: 'indoor'/'outdoor')
+  - Radio buttons in Events card: "Intérieur" / "Extérieur"
+  - Migration: `migrations/add_race_category.sql`
+- **Data Entry:**
+  - Batch imported 40 races for 14+ athletes
+  - Created Sofia Veilleux athlete record (`athlete_id: sofiaveilleux`, placeholder)
+- **Files Modified:** `supabase_shiny.py` (+882/-157), `complete_database_schema.sql`, `migrations/add_race_category.sql` (NEW)
+- **Deployed:** Live on production (multiple deployments), migration executed in Supabase
+
+### Phase 3K: Questionnaire Enhancements + All Activity Types (Feb 20, 2026) ✅
+- **Removed Redundant Fields:**
+  - Deleted `capacite_execution` (0-3 radio) and `douleur_impact` (Yes/No radio) from daily questionnaire
+  - Both now covered by OSTRC Q1 (Participation) and Q3 (Performance)
+  - Fields set to `None` in submission handler; DB columns preserved for backward compatibility
+- **OSTRC Tooltips:**
+  - Added red triangle tooltips with accented French definitions for all 4 OSTRC questions
+  - Uses existing tooltip CSS/JS infrastructure (event delegation on `document`)
+  - Unicode escape sequences for accents in Python→JS→HTML chain
+- **Date Cutoff (Feb 23, 2026):**
+  - Added `QUESTIONNAIRE_CUTOFF_DATE = "2026-02-23"` constant
+  - Daily questionnaire filters activities by date; weekly questionnaire sets `min_date`
+- **All Activity Types in Daily Questionnaire:**
+  - New reactive values: `quest_label_to_id`, `quest_id_to_info` for all activity types
+  - `all_type_labels` dict with French translations (Velo, Natation, Musculation, Cross-training, etc.)
+  - Hidden input `_daily_is_running` + `@reactive.Effect` drives `panel_conditional` visibility
+  - Running-specific UI sections (atteinte_obj, douleur, contexte, allures, modifs) hidden for non-running
+  - Non-running: RPE + commentaires only; submission stores NULLs for running-specific fields
+- **Database Migration:** `migrations/questionnaire_enhancements.sql` — `atteinte_obj` made nullable
+- **Files Modified:** `supabase_shiny.py` (+172/-87), `migrations/questionnaire_enhancements.sql` (NEW)
+- **Deployed:** Live on production (commit `2a382ff`), migration executed in Supabase
+
 ### Phase 3J: Questionnaire UX + Smart Rounding + OSTRC (Feb 16, 2026) ✅
 - **Questionnaire Layout Fixes:**
   - Removed `max-width: 1200px` from weekly questionnaire (now full width)
@@ -2540,6 +2820,10 @@ SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem rsc
 
 | Feature | Issue | Status |
 |---------|-------|--------|
+| **All Activity Types in Questionnaire** | Only running activities had questionnaires | ✅ Added (Feb 20, 2026) - Phase 3K |
+| **OSTRC Tooltips** | No definitions for OSTRC question scales | ✅ Added (Feb 20, 2026) - Phase 3K |
+| **Questionnaire Date Cutoff** | Athletes could see activities from any date | ✅ Fixed (Feb 20, 2026) - Phase 3K |
+| **Redundant Fields Removed** | capacite_execution + douleur_impact duplicated OSTRC Q1/Q3 | ✅ Fixed (Feb 20, 2026) - Phase 3K |
 | **OSTRC Questionnaire** | Body picker severity was too simplistic (1-3) | ✅ Added (Feb 16, 2026) - Phase 3J |
 | **Smart Rounding** | Hover values showed raw floats with 10+ decimals | ✅ Fixed (Feb 16, 2026) - Phase 3J |
 | **ATL/CTL Ratio** | No way to see training balance percentage | ✅ Added (Feb 16, 2026) - Phase 3J |
@@ -2593,4 +2877,4 @@ SSL_CERT_FILE=/opt/anaconda3/lib/python3.12/site-packages/certifi/cacert.pem rsc
 
 **END OF DOCUMENT**
 
-*Last Updated: February 16, 2026*
+*Last Updated: February 20, 2026*
